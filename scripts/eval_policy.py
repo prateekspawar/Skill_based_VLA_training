@@ -104,6 +104,12 @@ with sim_app.launch(env_cfg, args):
         steps = [("pick", language.skill_text("pick", object=language.cube_ref(cube))),
                  ("place", language.skill_text("place", target=language.plate_ref(plate)))]
         outcome = {"goal": language.goal_instruction(cube, plate), "pick": False, "place": False, "close": None}
+        # Perception looks at the scene once, before the arm moves (like a planner's first observation):
+        # later views are occluded by the arm and the held cube. Plates never move; cubes only once grasped.
+        perceived = (
+            {sk: perceive_target(sk, cube, plate, head_b) for sk in ("pick", "place")}
+            if args.target == "perception" else {}
+        )
         done = False
         for skill, text in steps:
             conn.send({"cmd": "reset"})
@@ -111,7 +117,7 @@ with sim_app.launch(env_cfg, args):
             # The target is fixed for the whole skill (cube before grasp, plate is static).
             target = oracle_target(skill, cube, plate, head_b) if args.target == "oracle" else None
             if args.target == "perception":
-                target = perceive_target(skill, cube, plate, head_b)
+                target = perceived[skill]
             t = 0
             while t < max_steps and not done:
                 reply_req = {"left": rgb("left_cam"), "right": rgb("right_cam"), "state": state_now(head_b)[0].cpu().numpy(), "task": text,
