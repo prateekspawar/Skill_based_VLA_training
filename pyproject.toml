@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "so101_lang"
+version = "0.1.0"
+description = "Language-conditioned SO-101 pick-and-place: Isaac Lab tasks, scripted expert, data export, planner and benchmark."
+requires-python = ">=3.12"
+# Dependencies are provided by the two venvs (~/isaacsim for simulation, ~/lerobot-env for policies),
+# so none are declared here. Install with: uv pip install --no-deps -e .
+
+[tool.setuptools.packages.find]
+include = ["so101_lang*"]
