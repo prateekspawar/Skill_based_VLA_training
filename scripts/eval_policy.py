@@ -20,7 +20,7 @@ parser.add_argument("--exec_steps", type=int, default=10, help="Actions executed
 parser.add_argument("--step_timeout", type=float, default=12.0, help="Seconds allowed per skill.")
 parser.add_argument("--port", type=int, default=6000)
 parser.add_argument("--heldout_pairs", action="store_true", help="Sample only the held-out (cube, plate) pairs.")
-parser.add_argument("--video", default="outputs/eval/episode0.mp4")
+parser.add_argument("--video_out", default="outputs/eval/episode0.mp4", help="Left-camera video of episode 0.")
 args, env_cfg = sim_app.parse(parser, TASK)
 env_cfg.scene.num_envs = 1
 env_cfg.episode_length_s = 2 * args.step_timeout + 2
@@ -101,8 +101,8 @@ with sim_app.launch(env_cfg, args):
         results.append(outcome)
         print(f"[eval] {ep:3d} '{outcome['goal']}': pick={'ok' if outcome['pick'] else 'FAIL'} place={'ok' if outcome['place'] else 'FAIL'}", flush=True)
         if ep == 0 and frames:
-            os.makedirs(os.path.dirname(args.video), exist_ok=True)
-            imageio.mimsave(args.video, frames, fps=round(1 / env.step_dt))
+            os.makedirs(os.path.dirname(args.video_out), exist_ok=True)
+            imageio.mimsave(args.video_out, frames, fps=round(1 / env.step_dt))
 
     n = len(results)
     pick = sum(r["pick"] for r in results)
