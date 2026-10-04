@@ -23,10 +23,11 @@ data = np.load(args.frames)
 cfg = StereoDepthCfg.from_calibration(json.loads(str(data["calibration"])))
 # Built one at a time (each FoundationStereo session holds its own GPU memory).
 backends = {
+
+
     "sgbm": lambda: StereoDepth(cfg),
-    "fs448_raw": lambda: FoundationStereoDepth(cfg, ONNX, 448, "none"),
-    "fs448_imagenet": lambda: FoundationStereoDepth(cfg, ONNX, 448, "imagenet"),
-    "fs512_raw": lambda: FoundationStereoDepth(cfg, ONNX, 512, "none"),
+    "fs448_cuda_fp32": lambda: FoundationStereoDepth(cfg, ONNX, 448, "imagenet", tensorrt=False),
+    "fs448_trt_fp32": lambda: FoundationStereoDepth(cfg, ONNX, 448, "imagenet", tensorrt=True, fp16=False),
 }
 rows = {name: [] for name in backends}
 for name, make in backends.items():

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Fine-tune SmolVLA on the simulated SO-101 pick-and-place dataset.
+# Fine-tune SmolVLA on the stereo + depth SO-101 dataset (robot-agnostic 10-D head-frame EE state/action).
+# Camera slots: left -> camera1, right -> camera2, stereo depth (TURBO colormap) -> camera3.
 # Usage: train/smolvla.sh <dataset_root> <output_dir> [extra lerobot-train args...]
 set -euo pipefail
 DATASET_ROOT=${1:?dataset root}
@@ -9,9 +10,9 @@ exec ~/lerobot-env/bin/lerobot-train \
   --policy.path=lerobot/smolvla_base \
   --policy.push_to_hub=false \
   --policy.device=cuda \
-  --policy.empty_cameras=1 \
-  --rename_map='{"observation.images.front": "observation.images.camera1", "observation.images.wrist": "observation.images.camera2"}' \
-  --dataset.repo_id=local/so101_pickplace_sim \
+  --policy.empty_cameras=0 \
+  --rename_map='{"observation.images.left": "observation.images.camera1", "observation.images.right": "observation.images.camera2", "observation.images.depth": "observation.images.camera3"}' \
+  --dataset.repo_id=local/so101_stereo_ee \
   --dataset.root="$DATASET_ROOT" \
   --dataset.video_backend=pyav \
   --batch_size=32 \
@@ -21,5 +22,5 @@ exec ~/lerobot-env/bin/lerobot-train \
   --log_freq=100 \
   --wandb.enable=false \
   --output_dir="$OUTPUT_DIR" \
-  --job_name=smolvla_so101_pickplace \
+  --job_name=smolvla_so101_stereo_depth \
   "$@"

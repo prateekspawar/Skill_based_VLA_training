@@ -8,6 +8,8 @@ Run in the ``~/lerobot-env`` venv:
 Policy-facing features are robot-agnostic:
 
 * ``observation.images.left`` / ``observation.images.right`` - the stereo head pair
+* ``observation.images.depth`` - depth computed from the pair (FoundationStereo by default), metric
+  0.25-0.85 m encoded with the TURBO colormap (near = red, far = blue), aligned with the left image
 * ``observation.state`` - TCP pose in the head frame (pos + rot6d) + gripper opening (10-D)
 * ``action`` - commanded TCP pose in the head frame + commanded gripper opening (10-D)
 * ``task`` (per frame) - the natural-language step of the skill being executed
@@ -31,12 +33,28 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
 
 
-def features(height: int, width: int, state_names: list[str]) -> dict:
+FS_ONNX = "models/foundationstereo_s/onnx/deployable_foundation_stereo_s_dynamic.onnx"
+
+
+def make_depth_backend(kind: str, calibration: dict):
+    from so101_lang.perception.stereo_depth import FoundationStereoDepth, StereoDepth, StereoDepthCfg
+
+    cfg = StereoDepthCfg.from_calibration(calibration)
+    if kind == "foundationstereo":
+        return FoundationStereoDepth(cfg, FS_ONNX, infer_size=448, normalize="imagenet")
+    if kind == "sgbm":
+        return StereoDepth(cfg)
+    return None
+
+
+def features(height: int, width: int, state_names: list[str], with_depth: bool) -> dict:
     image = {"dtype": "video", "shape": (height, width, 3), "names": ["height", "width", "channels"]}
     vec = {"dtype": "float32", "shape": (len(state_names),), "names": state_names}
+    depth = {"observation.images.depth": dict(image)} if with_depth else {}
     return {
         "observation.images.left": image,
         "observation.images.right": dict(image),
+        **depth,
         "observation.state": vec,
         "action": dict(vec),
         "so101.joint_pos": {"dtype": "float32", "shape": (len(JOINTS),), "names": [f"{j}.pos" for j in JOINTS]},
@@ -51,6 +69,7 @@ def main():
     parser.add_argument("--repo_id", default="local/so101_stereo_ee")
     parser.add_argument("--max_episodes", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--depth", choices=["foundationstereo", "sgbm", "none"], default="foundationstereo")
     args = parser.parse_args()
 
     root = Path(args.root)
@@ -59,12 +78,14 @@ def main():
             raise SystemExit(f"{root} exists; pass --overwrite to replace it")
         shutil.rmtree(root)
 
-    dataset, calibration, count = None, None, 0
+    dataset, calibration, count, depth = None, None, 0, None
     for path in args.inputs:
         with h5py.File(path, "r") as h5:
             fps = int(h5.attrs["fps"])
             skills = list(h5.attrs["skills"])
             calibration = calibration or json.loads(h5.attrs["calibration"])
+            if depth is None and args.depth != "none":
+                depth = make_depth_backend(args.depth, calibration)
             for name in sorted(h5.keys()):
                 if args.max_episodes is not None and count >= args.max_episodes:
                     break
@@ -74,7 +95,7 @@ def main():
                     dataset = LeRobotDataset.create(
                         repo_id=args.repo_id,
                         fps=fps,
-                        features=features(*left.shape[1:3], list(h5.attrs["state_names"])),
+                        features=features(*left.shape[1:3], list(h5.attrs["state_names"]), depth is not None),
                         root=root,
                         robot_type="so101_follower",
                         use_videos=True,
@@ -84,8 +105,10 @@ def main():
                 state, action = ep["state"][()], ep["action"][()]
                 joints, skill = ep["joint_pos"][()], ep["skill"][()]
                 for t in range(len(action)):
+                    extra = {"observation.images.depth": depth.depth_rgb(left[t], right[t])} if depth else {}
                     dataset.add_frame(
                         {
+                            **extra,
                             "observation.images.left": left[t],
                             "observation.images.right": right[t],
                             "observation.state": state[t].astype(np.float32),
@@ -97,7 +120,7 @@ def main():
                     )
                 dataset.save_episode()
                 count += 1
-                if count % 50 == 0:
+                if count % 10 == 0:
                     print(f"[convert] {count} episodes", flush=True)
     if dataset is None:
         raise SystemExit("no episodes found")

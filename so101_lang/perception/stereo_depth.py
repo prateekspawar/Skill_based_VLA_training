@@ -123,7 +123,17 @@ class FoundationStereoDepth:
     Model: https://huggingface.co/nvidia/c-foundationstereo-s (NVIDIA Open Model License).
     """
 
-    def __init__(self, cfg: StereoDepthCfg, onnx_path: str, infer_size: int = 448, normalize: str = "none"):
+    def __init__(
+        self,
+        cfg: StereoDepthCfg,
+        onnx_path: str,
+        infer_size: int = 448,
+        normalize: str = "none",
+        tensorrt: bool = True,
+        fp16: bool = False,  # FP16 engines lose accuracy on this model (64 mm vs 2.6 mm median error)
+    ):
+        import os
+
         import onnxruntime as ort
 
         try:  # load the CUDA/cuDNN libraries bundled with PyTorch, if present
@@ -132,9 +142,25 @@ class FoundationStereoDepth:
             ort.preload_dlls(directory="")
         except Exception:
             pass
+        providers = [("CUDAExecutionProvider", {"arena_extend_strategy": "kSameAsRequested"}), "CPUExecutionProvider"]
+        if tensorrt and _load_tensorrt_libs():
+            shape = f"left_image:1x3x{infer_size}x{infer_size},right_image:1x3x{infer_size}x{infer_size}"
+            cache = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(onnx_path))), "trt_cache")
+            os.makedirs(cache, exist_ok=True)
+            trt_opts = {
+                "trt_fp16_enable": fp16,
+                "trt_layer_norm_fp32_fallback": True,  # keep LayerNorm in FP32 so FP16 stays accurate
+                "trt_engine_cache_enable": True,  # first build takes minutes; later sessions load it in seconds
+                "trt_engine_cache_path": cache,
+                "trt_profile_min_shapes": shape,
+                "trt_profile_opt_shapes": shape,
+                "trt_profile_max_shapes": shape,
+                "trt_max_workspace_size": 4 << 30,
+            }
+            providers.insert(0, ("TensorrtExecutionProvider", trt_opts))
         so = ort.SessionOptions()
         so.log_severity_level = 3
-        self.session = ort.InferenceSession(onnx_path, so, providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+        self.session = ort.InferenceSession(onnx_path, so, providers=providers)
         self.cfg, self.size, self.normalize = cfg, infer_size, normalize
 
     def _prep(self, rgb: np.ndarray) -> np.ndarray:
@@ -159,3 +185,21 @@ class FoundationStereoDepth:
 
     def depth_rgb(self, left_rgb: np.ndarray, right_rgb: np.ndarray) -> np.ndarray:
         return depth_to_rgb(self.depth(left_rgb, right_rgb), self.cfg.near, self.cfg.far)
+
+
+def _load_tensorrt_libs() -> bool:
+    """Make the pip-installed TensorRT libraries visible to ONNX Runtime's TensorRT provider."""
+    import ctypes
+    import os
+
+    try:
+        import tensorrt_libs
+    except ImportError:
+        return False
+    libdir = os.path.dirname(tensorrt_libs.__file__)
+    try:
+        for lib in ("libnvinfer.so.10", "libnvinfer_plugin.so.10", "libnvonnxparser.so.10"):
+            ctypes.CDLL(os.path.join(libdir, lib), mode=ctypes.RTLD_GLOBAL)
+    except OSError:
+        return False
+    return True
