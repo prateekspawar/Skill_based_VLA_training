@@ -20,7 +20,7 @@ import torch
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 
-from so101_lang.data.hdf5_to_lerobot import make_depth_backend
+from so101_lang.data.hdf5_to_lerobot import DEPTH_KINDS, make_depth_backend
 
 RENAME = {
     "observation.images.left": "observation.images.camera1",
@@ -34,15 +34,9 @@ def to_image(rgb: np.ndarray, device: str) -> torch.Tensor:
     return torch.from_numpy(rgb).permute(2, 0, 1).float().div(255.0).unsqueeze(0).to(device)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", required=True, help="Path to a pretrained_model directory")
-    parser.add_argument("--calibration", default=None, help="stereo_calibration.json (defaults to the training dataset's)")
-    parser.add_argument("--depth", choices=["foundationstereo", "sgbm", "none"], default="foundationstereo")
-    parser.add_argument("--port", type=int, default=6000)
-    args = parser.parse_args()
-
-    ckpt = Path(args.checkpoint)
+def load_policy(checkpoint: str, depth_kind: str, calibration: str | None = None):
+    """Load a trained policy, its pre/post-processors and (if it has a depth camera) the depth backend."""
+    ckpt = Path(checkpoint)
     cfg = PreTrainedConfig.from_pretrained(ckpt)
     cfg.pretrained_path = str(ckpt)
     policy = get_policy_class(cfg.type).from_pretrained(ckpt, config=cfg).to("cuda").eval()
@@ -51,11 +45,35 @@ def main():
         pretrained_path=str(ckpt),
         preprocessor_overrides={"device_processor": {"device": "cuda"}, "rename_observations_processor": {"rename_map": RENAME}},
     )
-    uses_depth = "observation.images.camera3" in cfg.input_features and args.depth != "none"
     depth = None
-    if uses_depth:
-        calib_path = args.calibration or json.loads((ckpt / "train_config.json").read_text())["dataset"]["root"] + "/meta/stereo_calibration.json"
-        depth = make_depth_backend(args.depth, json.loads(Path(calib_path).read_text()))
+    if "observation.images.camera3" in cfg.input_features and depth_kind != "none":
+        calib_path = calibration or json.loads((ckpt / "train_config.json").read_text())["dataset"]["root"] + "/meta/stereo_calibration.json"
+        depth = make_depth_backend(depth_kind, json.loads(Path(calib_path).read_text()))
+    return cfg, policy, pre, post, depth
+
+
+def build_obs(msg: dict, depth) -> dict:
+    obs = {
+        "observation.images.left": to_image(msg["left"], "cuda"),
+        "observation.images.right": to_image(msg["right"], "cuda"),
+        "observation.state": torch.as_tensor(msg["state"], dtype=torch.float32).unsqueeze(0).cuda(),
+        "task": [msg["task"]],
+    }
+    if depth is not None:
+        obs["observation.images.depth"] = to_image(depth.depth_rgb(msg["left"], msg["right"]), "cuda")
+    return obs
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkpoint", required=True, help="Path to a pretrained_model directory")
+    parser.add_argument("--calibration", default=None, help="stereo_calibration.json (defaults to the training dataset's)")
+    parser.add_argument("--depth", choices=DEPTH_KINDS, default="fast_foundationstereo")
+    parser.add_argument("--port", type=int, default=6000)
+    args = parser.parse_args()
+
+    ckpt = Path(args.checkpoint)
+    cfg, policy, pre, post, depth = load_policy(args.checkpoint, args.depth, args.calibration)
     print(f"[server] {cfg.type} loaded from {ckpt}; depth={'on' if depth else 'off'}; listening on :{args.port}", flush=True)
 
     with Listener(("localhost", args.port), authkey=AUTHKEY) as listener:
@@ -72,14 +90,7 @@ def main():
                         conn.send({"ok": True})
                         continue
                     t0 = time.time()
-                    obs = {
-                        "observation.images.left": to_image(msg["left"], "cuda"),
-                        "observation.images.right": to_image(msg["right"], "cuda"),
-                        "observation.state": torch.as_tensor(msg["state"], dtype=torch.float32).unsqueeze(0).cuda(),
-                        "task": [msg["task"]],
-                    }
-                    if depth is not None:
-                        obs["observation.images.depth"] = to_image(depth.depth_rgb(msg["left"], msg["right"]), "cuda")
+                    obs = build_obs(msg, depth)
                     t_depth = time.time() - t0
                     with torch.no_grad():
                         chunk = policy.predict_action_chunk(pre(obs))  # (1, T, D), normalized

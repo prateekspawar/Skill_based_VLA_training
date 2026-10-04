@@ -34,12 +34,17 @@ JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_ro
 
 
 FS_ONNX = "models/foundationstereo_s/onnx/deployable_foundation_stereo_s_dynamic.onnx"
+FFS_ONNX = "models/fast_foundationstereo/onnx/c_fast_foundationstereo_bp2_dynbatch_dynhw.onnx"
+DEPTH_KINDS = ["fast_foundationstereo", "foundationstereo", "sgbm", "none"]
 
 
 def make_depth_backend(kind: str, calibration: dict):
+    """fast_foundationstereo: TensorRT FP16 @320 (~9 ms); foundationstereo: TensorRT FP32 @448 (~300 ms); sgbm: OpenCV."""
     from so101_lang.perception.stereo_depth import FoundationStereoDepth, StereoDepth, StereoDepthCfg
 
     cfg = StereoDepthCfg.from_calibration(calibration)
+    if kind == "fast_foundationstereo":
+        return FoundationStereoDepth(cfg, FFS_ONNX, infer_size=320, normalize="imagenet", tensorrt=True, fp16=True)
     if kind == "foundationstereo":
         return FoundationStereoDepth(cfg, FS_ONNX, infer_size=448, normalize="imagenet")
     if kind == "sgbm":
@@ -69,7 +74,7 @@ def main():
     parser.add_argument("--repo_id", default="local/so101_stereo_ee")
     parser.add_argument("--max_episodes", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--depth", choices=["foundationstereo", "sgbm", "none"], default="foundationstereo")
+    parser.add_argument("--depth", choices=DEPTH_KINDS, default="fast_foundationstereo")
     args = parser.parse_args()
 
     root = Path(args.root)
