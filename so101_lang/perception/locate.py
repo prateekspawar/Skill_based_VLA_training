@@ -4,8 +4,8 @@
     point, info = locator.locate(left_rgb, right_rgb, "red cube")   # (3,) head-frame metres
 
 Detection: OWLv2 (google/owlv2-base-patch16-ensemble, Apache-2.0) scores the query against the image.
-3-D: Fast-FoundationStereo depth inside the detected box is back-projected to the head frame and the
-median of the central region is taken; for solid objects the point is pushed half an object depth
+3-D: Fast-FoundationStereo depth inside the detected box (or a tracked mask, see sam2_tracker.py) is
+back-projected to the head frame and the median is taken; for solid objects the point is pushed half an object depth
 further along the viewing ray so it approximates the object's centre rather than its visible surface.
 """
 
@@ -53,18 +53,21 @@ class TargetLocator:
 
     def locate(self, left: np.ndarray, right: np.ndarray, query: str) -> tuple[np.ndarray, dict]:
         box, score = self.detect(left, query)
-        z = self.depth.depth(left, right)
-        k = self.calib["intrinsics"]
         x0, y0, x1, y1 = box
         # Central 50% of the box avoids background pixels at the edges.
         cx, cy, hw, hh = (x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 4, (y1 - y0) / 4
-        us, vs = np.meshgrid(np.arange(int(cx - hw), int(cx + hw) + 1), np.arange(int(cy - hh), int(cy + hh) + 1))
-        us, vs = us.clip(0, z.shape[1] - 1), vs.clip(0, z.shape[0] - 1)
-        d = z[vs, us]
-        ok = np.isfinite(d)
-        if not ok.any():
-            raise RuntimeError(f"no valid depth inside the box for '{query}'")
-        d, u, v = d[ok], us[ok] + 0.5, vs[ok] + 0.5
+        mask = np.zeros(left.shape[:2], dtype=bool)
+        mask[int(max(cy - hh, 0)) : int(cy + hh) + 1, int(max(cx - hw, 0)) : int(cx + hw) + 1] = True
+        p, n = self.point_from_mask(self.depth.depth(left, right), mask, query)
+        return p, {"box": box.tolist(), "score": score, "n_depth_px": n}
+
+    def point_from_mask(self, depth: np.ndarray, mask: np.ndarray, query: str) -> tuple[np.ndarray, int]:
+        """Median head-frame 3-D point of the masked pixels (pushed to the object centre for solid objects)."""
+        k = self.calib["intrinsics"]
+        vs, us = np.nonzero(mask & np.isfinite(depth))
+        if len(us) == 0:
+            raise RuntimeError(f"no valid depth inside the mask for '{query}'")
+        d, u, v = depth[vs, us], us + 0.5, vs + 0.5
         # Back-project (optical: x right, y down, z forward) and move to the head frame (x fwd, y left, z up).
         xc, yc = (u - k["cx"]) / k["fx"] * d, (v - k["cy"]) / k["fy"] * d
         off = self.calib["cameras"]["left"]["position_in_head"]
@@ -74,4 +77,5 @@ class TargetLocator:
         kind = next((k for k in OBJECT_HALF_DEPTH if k in query), None)
         if kind:
             p = p + ray / np.linalg.norm(ray) * OBJECT_HALF_DEPTH[kind]
-        return p.astype(np.float32), {"box": box.tolist(), "score": score, "n_depth_px": int(ok.sum())}
+        return p.astype(np.float32), int(len(us))
+

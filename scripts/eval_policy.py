@@ -20,10 +20,11 @@ parser.add_argument("--exec_steps", type=int, default=10, help="Actions executed
 parser.add_argument("--step_timeout", type=float, default=12.0, help="Seconds allowed per skill.")
 parser.add_argument("--port", type=int, default=6000)
 parser.add_argument("--heldout_pairs", action="store_true", help="Sample only the held-out (cube, plate) pairs.")
-parser.add_argument("--target", choices=["none", "oracle", "perception", "tracked", "oracle_tracked"], default="none",
+parser.add_argument("--target", choices=["none", "oracle", "perception", "sam2", "oracle_tracked"], default="none",
                     help="Skill target point (head frame): oracle = simulator truth at skill start; perception = OWLv2 + "
-                         "stereo once at episode start; tracked = perception re-run every query and fused by a Kalman "
-                         "tracker; oracle_tracked = simulator truth refreshed every query (upper bound).")
+                         "stereo once at episode start; sam2 = OWLv2 seeds SAM2 at episode start, masks are propagated "
+                         "every query and turned into points with stereo depth; oracle_tracked = simulator truth "
+                         "refreshed every query (upper bound).")
 parser.add_argument("--push", action="store_true",
                     help="Moving-target test: during pick, teleport the target cube 3-6 cm while the gripper is still away.")
 parser.add_argument("--seed", type=int, default=0, help="Seeds layouts and pushes so runs are comparable.")
@@ -104,16 +105,24 @@ with sim_app.launch(env_cfg, args):
         perception_err.append((skill, err))
         return reply["point"]
 
-    def track_target(skill, cube, plate, head_b, sim_t):
-        """Re-run perception and fuse it into the server-side Kalman track for this skill's object."""
-        query = language.cube_ref(cube) if skill == "pick" else language.plate_ref(plate)
-        conn.send({"cmd": "track", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": query, "t": sim_t})
+    def sam2_targets(cmd, cube, plate, head_b, frozen=()):
+        """Start or update SAM2 tracking of the episode's pick cube and place plate; returns head-frame points."""
+        queries = {"pick": language.cube_ref(cube), "place": language.plate_ref(plate)}
+        msg = {"cmd": cmd, "left": rgb("left_cam"), "right": rgb("right_cam")}
+        if cmd == "sam2_start":
+            msg["queries"] = [queries["pick"], queries["place"]]
+        else:
+            msg["frozen"] = [queries[sk] for sk in frozen]
+        conn.send(msg)
         reply = conn.recv()
-        truth = oracle_target(skill, cube, plate, head_b)
-        perception_err.append((skill, 1000 * float(np.linalg.norm(reply["raw"] - truth))))
-        track_err.append((skill, 1000 * float(np.linalg.norm(reply["point"] - truth))))
-        track_status[reply["status"]] = track_status.get(reply["status"], 0) + 1
-        return reply["point"]
+        out = {}
+        for sk, q in queries.items():
+            out[sk] = reply["points"][q]
+            if sk not in frozen:
+                track_err.append((sk, 1000 * float(np.linalg.norm(out[sk] - oracle_target(sk, cube, plate, head_b)))))
+            st = reply["info"][q]["status"]
+            track_status[st] = track_status.get(st, 0) + 1
+        return out
 
     def push_cube(cube, rng):
         """Teleport the target cube 3-6 cm in a random direction to a free spot in the workspace."""
@@ -158,10 +167,8 @@ with sim_app.launch(env_cfg, args):
             if args.target == "perception" else {}
         )
         ep_steps = 0
-        if args.target == "tracked":
-            conn.send({"cmd": "track_reset"})
-            conn.recv()
-            perceived = {sk: track_target(sk, cube, plate, head_b, 0.0) for sk in ("pick", "place")}
+        if args.target == "sam2":
+            perceived = sam2_targets("sam2_start", cube, plate, head_b)
         rng = np.random.default_rng(args.seed * 1000 + ep)
         push_at = rng.uniform(0.6, 1.6)  # [s] into the pick skill
         outcome["push_mm"] = None
@@ -171,15 +178,22 @@ with sim_app.launch(env_cfg, args):
             conn.recv()
             # The target is fixed for the whole skill (cube before grasp, plate is static).
             target = oracle_target(skill, cube, plate, head_b) if args.target == "oracle" else None
-            if args.target in ("perception", "tracked"):
+            if args.target in ("perception", "sam2"):
                 target = perceived[skill]
             t = 0
             while t < max_steps and not done:
                 # Dynamic targets: refresh before every query while the object can still move (pick: until
                 # the gripper starts closing on it; place: the plate, which normally stays put).
                 still_tracking = skill == "place" or outcome["close"] is None
-                if args.target == "tracked" and still_tracking and t > 0:
-                    target = track_target(skill, cube, plate, head_b, ep_steps * env.step_dt)
+                if args.target == "sam2" and t > 0:
+                    # Freeze a target once the gripper is close to it: the gripper / held cube then overlaps the
+                    # object's mask, and an object about to be grasped or placed on cannot be re-targeted anyway.
+                    tcp_h = state_now(head_b)[0, :3].cpu().numpy()
+                    frozen = tuple(sk for sk, radius in (("pick", 0.05), ("place", 0.06))
+                                   if np.linalg.norm(tcp_h - perceived[sk]) < radius
+                                   or (sk == "pick" and outcome["close"] is not None))
+                    perceived = sam2_targets("sam2_update", cube, plate, head_b, frozen)
+                    target = perceived[skill]
                 if args.target == "oracle_tracked" and still_tracking:
                     target = oracle_target(skill, cube, plate, head_b)
                 reply_req = {"left": rgb("left_cam"), "right": rgb("right_cam"), "state": state_now(head_b)[0].cpu().numpy(), "task": text,

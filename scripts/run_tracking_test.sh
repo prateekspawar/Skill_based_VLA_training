@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Moving-target test: static perception vs Kalman-tracked perception vs oracle tracking, with cube pushes.
+# Target tracking tests: static perception vs SAM2 tracking (stationary first), then with cube pushes.
 # Usage: scripts/run_tracking_test.sh <checkpoint> [episodes]
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -16,9 +16,11 @@ run() {  # name, extra args
     --video_out "outputs/tracking/$name.mp4" "$@" > "outputs/tracking/$name.log" 2>&1
   grep -E "\[eval\] (pick success|pushes|target-point|tracked|tracker)" "outputs/tracking/$name.log" | sed "s/^/[tracking] $name: /"
 }
-run A_static_push --target perception --push
-run B_tracked_push --target tracked --push
-run C_oracle_push --target oracle_tracked --push
-run D_tracked_nopush --target tracked
+ONLY=${ONLY:-S1 S2}  # subset of variants to run
+[[ " $ONLY " == *" S1 "* ]] && run S1_static_still --target perception
+[[ " $ONLY " == *" S2 "* ]] && run S2_sam2_still --target sam2
+[[ " $ONLY " == *" P1 "* ]] && run P1_static_push --target perception --push
+[[ " $ONLY " == *" P2 "* ]] && run P2_sam2_push --target sam2 --push
+[[ " $ONLY " == *" P3 "* ]] && run P3_oracle_push --target oracle_tracked --push
 kill $server; wait $server 2>/dev/null
 echo "[tracking] $(date +%T) done"
