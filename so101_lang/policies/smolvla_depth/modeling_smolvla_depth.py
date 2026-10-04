@@ -1,9 +1,13 @@
-"""SmolVLA + native depth tokens.
+"""SmolVLA + native depth tokens (+ optional state-relative actions).
 
 A small conv encoder turns the (3, 64, 64) head-frame point map (plus a validity channel) into an 8x8 grid
 of tokens in the VLM hidden size. They are inserted into the prefix right before the state token (same
 bidirectional attention block as image/language tokens) through a zero-initialized gate, so a freshly
 initialized branch leaves the pretrained SmolVLA behaviour unchanged and training grows its influence.
+
+With ``relative_action_dims = N`` the model is trained on ``action_norm[..., :N] - state_norm[..., :N]`` and the
+state is added back to its predictions, so it learns small corrections around the current gripper pose
+instead of absolute coordinates.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import torch
 from torch import nn
 
 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy, VLAFlowMatching
+from lerobot.utils.constants import ACTION, OBS_STATE
 
 from .configuration_smolvla_depth import SmolVLADepthConfig
 
@@ -64,13 +69,28 @@ class SmolVLADepthPolicy(SmolVLAPolicy):
 
     def __init__(self, config: SmolVLADepthConfig, **kwargs):
         super().__init__(config, **kwargs)
-        self.model.__class__ = VLAFlowMatchingDepth
-        hidden = self.model.vlm_with_expert.config.text_config.hidden_size
-        self.model.depth_encoder = DepthTokenEncoder(
-            hidden, config.depth_channels, config.depth_token_grid, config.pointmap_size, config.pointmap_scale
-        )
+        if config.use_depth_branch:
+            self.model.__class__ = VLAFlowMatchingDepth
+            hidden = self.model.vlm_with_expert.config.text_config.hidden_size
+            self.model.depth_encoder = DepthTokenEncoder(
+                hidden, config.depth_channels, config.depth_token_grid, config.pointmap_size, config.pointmap_scale
+            )
+
+    def _state_offset(self, batch) -> torch.Tensor | None:
+        """Normalized current state restricted to the relative dims, shaped (B, 1, N)."""
+        n = self.config.relative_action_dims
+        if not n:
+            return None
+        state = batch[OBS_STATE]
+        if state.ndim == 3:  # (B, T, D) observation history -> latest
+            state = state[:, -1]
+        if state.shape[-1] < n:
+            raise ValueError(f"relative_action_dims={n} exceeds the state dimension {state.shape[-1]}")
+        return state[:, None, :n]
 
     def _set_pointmap(self, batch):
+        if not self.config.use_depth_branch:
+            return
         pm = batch.get(self.config.pointmap_key)
         if pm is not None:
             if pm.ndim == 3:  # single unbatched observation
@@ -81,8 +101,18 @@ class SmolVLADepthPolicy(SmolVLAPolicy):
 
     def forward(self, batch, noise=None, time=None, reduction: str = "mean"):
         self._set_pointmap(batch)
+        offset = self._state_offset(batch)
+        if offset is not None:
+            batch = dict(batch)
+            n = offset.shape[-1]
+            batch[ACTION] = torch.cat([batch[ACTION][..., :n] - offset, batch[ACTION][..., n:]], dim=-1)
         return super().forward(batch, noise=noise, time=time, reduction=reduction)
 
     def _get_action_chunk(self, batch, noise=None, **kwargs):
         self._set_pointmap(batch)
-        return super()._get_action_chunk(batch, noise, **kwargs)
+        actions = super()._get_action_chunk(batch, noise, **kwargs)
+        offset = self._state_offset(batch)
+        if offset is not None:
+            n = offset.shape[-1]
+            actions = torch.cat([actions[..., :n] + offset.to(actions.dtype), actions[..., n:]], dim=-1)
+        return actions

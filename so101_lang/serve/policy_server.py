@@ -49,7 +49,7 @@ def load_policy(checkpoint: str, depth_kind: str, calibration: str | None = None
     )
     depth = None
     wants_camera = "observation.images.camera3" in cfg.input_features
-    wants_pointmap = getattr(cfg, "pointmap_key", None) is not None
+    wants_pointmap = getattr(cfg, "use_depth_branch", False)
     if (wants_camera or wants_pointmap) and depth_kind != "none":
         calib_path = calibration or json.loads((ckpt / "train_config.json").read_text())["dataset"]["root"] + "/meta/stereo_calibration.json"
         calib = json.loads(Path(calib_path).read_text())
