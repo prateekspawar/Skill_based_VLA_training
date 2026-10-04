@@ -62,7 +62,11 @@ def build_obs(msg: dict, depth) -> dict:
     obs = {
         "observation.images.left": to_image(msg["left"], "cuda"),
         "observation.images.right": to_image(msg["right"], "cuda"),
-        "observation.state": torch.as_tensor(msg["state"], dtype=torch.float32).unsqueeze(0).cuda(),
+        # A target point (head frame, from the simulator or from perception) extends the state to 13-D.
+        "observation.state": torch.as_tensor(
+            np.concatenate([msg["state"], msg["target"]]) if msg.get("target") is not None else msg["state"],
+            dtype=torch.float32,
+        ).unsqueeze(0).cuda(),
         "task": [msg["task"]],
     }
     if depth is not None:
@@ -85,6 +89,7 @@ def main():
 
     ckpt = Path(args.checkpoint)
     cfg, policy, pre, post, depth = load_policy(args.checkpoint, args.depth, args.calibration)
+    locator = None  # created on the first "locate" request
     print(f"[server] {cfg.type} loaded from {ckpt}; depth={'on' if depth else 'off'}; listening on :{args.port}", flush=True)
 
     with Listener(("localhost", args.port), authkey=AUTHKEY) as listener:
@@ -99,6 +104,16 @@ def main():
                     if msg.get("cmd") == "reset":
                         policy.reset()
                         conn.send({"ok": True})
+                        continue
+                    if msg.get("cmd") == "locate":  # perception: object name -> 3-D point (head frame)
+                        if locator is None:
+                            from so101_lang.perception.locate import TargetLocator
+
+                            calib_path = args.calibration or json.loads((ckpt / "train_config.json").read_text())["dataset"]["root"] + "/meta/stereo_calibration.json"
+                            locator = TargetLocator(json.loads(Path(calib_path).read_text()))
+                        t0 = time.time()
+                        point, info = locator.locate(msg["left"], msg["right"], msg["query"])
+                        conn.send({"point": point, **info, "t_locate": time.time() - t0})
                         continue
                     t0 = time.time()
                     obs = build_obs(msg, depth)

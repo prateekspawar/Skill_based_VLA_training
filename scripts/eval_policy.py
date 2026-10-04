@@ -20,6 +20,8 @@ parser.add_argument("--exec_steps", type=int, default=10, help="Actions executed
 parser.add_argument("--step_timeout", type=float, default=12.0, help="Seconds allowed per skill.")
 parser.add_argument("--port", type=int, default=6000)
 parser.add_argument("--heldout_pairs", action="store_true", help="Sample only the held-out (cube, plate) pairs.")
+parser.add_argument("--target", choices=["none", "oracle", "perception"], default="none",
+                    help="Send the skill's target point (head frame): from simulator ground truth or from perception.")
 parser.add_argument("--video_out", default="outputs/eval/episode0.mp4", help="Left-camera video of episode 0.")
 args, env_cfg = sim_app.parse(parser, TASK)
 env_cfg.scene.num_envs = 1
@@ -36,6 +38,7 @@ with sim_app.launch(env_cfg, args):
 
     from so101_lang import language
     from so101_lang.envs.head import head_in_base
+    from so101_lang.robots import frames
     from so101_lang.robots.so101 import SO101Adapter
 
     if args.heldout_pairs:
@@ -67,10 +70,28 @@ with sim_app.launch(env_cfg, args):
         ])
         return tcp[0], cubes
 
+    def oracle_target(skill, cube, plate, head_b):
+        """Target point in the head frame: the cube's centre for pick, the plate's centre for place."""
+        name = f"cube_{cube}" if skill == "pick" else f"plate_{plate}"
+        p_b = math_utils.subtract_frame_transforms(
+            robot.data.root_pos_w.torch, robot.data.root_quat_w.torch, env.scene[name].data.root_pos_w.torch
+        )[0]
+        base_in_head = frames.invert_transform(head_b)
+        return (base_in_head[0, :3, :3] @ p_b[0] + base_in_head[0, :3, 3]).cpu().numpy()
+
     def rgb(cam):
         return env.scene[cam].data.output["rgb"][0, ..., :3].to(torch.uint8).cpu().numpy()
 
-    results, frames, latencies = [], [], []
+    def perceive_target(skill, cube, plate, head_b):
+        """Ask the server's perception (OWLv2 + stereo depth) where the named object is; log its error."""
+        query = language.cube_ref(cube) if skill == "pick" else language.plate_ref(plate)
+        conn.send({"cmd": "locate", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": query})
+        reply = conn.recv()
+        err = 1000 * float(np.linalg.norm(reply["point"] - oracle_target(skill, cube, plate, head_b)))
+        perception_err.append((skill, err))
+        return reply["point"]
+
+    results, frames_out, latencies, perception_err = [], [], [], []
     torch.inference_mode().__enter__()
     for ep in range(args.episodes):
         env.reset()
@@ -87,9 +108,14 @@ with sim_app.launch(env_cfg, args):
         for skill, text in steps:
             conn.send({"cmd": "reset"})
             conn.recv()
+            # The target is fixed for the whole skill (cube before grasp, plate is static).
+            target = oracle_target(skill, cube, plate, head_b) if args.target == "oracle" else None
+            if args.target == "perception":
+                target = perceive_target(skill, cube, plate, head_b)
             t = 0
             while t < max_steps and not done:
-                reply_req = {"left": rgb("left_cam"), "right": rgb("right_cam"), "state": state_now(head_b)[0].cpu().numpy(), "task": text}
+                reply_req = {"left": rgb("left_cam"), "right": rgb("right_cam"), "state": state_now(head_b)[0].cpu().numpy(), "task": text,
+                             "target": target}
                 conn.send(reply_req)
                 reply = conn.recv()
                 latencies.append(reply["t_total"])
@@ -103,7 +129,7 @@ with sim_app.launch(env_cfg, args):
                     _, _, term, trunc, _ = env.step(adapter.ik_command(a.unsqueeze(0), head_b))
                     t += 1
                     if ep == 0:
-                        frames.append(rgb("left_cam"))
+                        frames_out.append(rgb("left_cam"))
                     lifted = float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) > rest_z + 0.03
                     if skill == "pick" and lifted:
                         outcome["pick"] = True
@@ -122,14 +148,19 @@ with sim_app.launch(env_cfg, args):
         close_txt = (f"close: target dxy={close[0]:.0f}mm dz={close[1]:+.0f}mm nearest={close[2]}" if close else "never closed")
         print(f"[eval] {ep:3d} '{outcome['goal']}': pick={'ok' if outcome['pick'] else 'FAIL'} "
               f"place={'ok' if outcome['place'] else 'FAIL'} | {close_txt}", flush=True)
-        if ep == 0 and frames:
+        if ep == 0 and frames_out:
             os.makedirs(os.path.dirname(args.video_out), exist_ok=True)
-            imageio.mimsave(args.video_out, frames, fps=round(1 / env.step_dt))
+            imageio.mimsave(args.video_out, frames_out, fps=round(1 / env.step_dt))
 
     n = len(results)
     pick = sum(r["pick"] for r in results)
     full = sum(r["place"] for r in results)
     print(f"[eval] pick success {pick}/{n} = {pick / n:.0%}; full pick+place {full}/{n} = {full / n:.0%}; "
           f"mean server latency {1000 * np.mean(latencies):.0f} ms")
+    if perception_err:
+        for sk in ("pick", "place"):
+            e = [x for s_, x in perception_err if s_ == sk]
+            if e:
+                print(f"[eval] perception error ({sk} target): median {np.median(e):.0f} mm, max {np.max(e):.0f} mm [{len(e)}]")
     conn.close()
     env.close()
