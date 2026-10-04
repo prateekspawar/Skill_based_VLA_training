@@ -10,7 +10,8 @@ Only successful episodes are kept; the first step after a reset (stale camera re
         attrs: goal, cube_idx, plate_idx, pick_text, place_text
         left_rgb, right_rgb (T, H, W, 3) uint8
         state     (T, 10) float32   measured TCP pose (head frame, pos + rot6d) + gripper opening
-        action    (T, 10) float32   commanded TCP pose (head frame) + commanded gripper opening
+        action    (T, 10) float32   clean expert TCP command (head frame) + gripper opening; with DART the
+                                    executed command carries a smooth random offset, the label does not
         joint_pos (T, 6)  float32   SO-101 joint angles [rad] (reference only)
         skill     (T,)    uint8     0 = pick, 1 = place
         init_poses (K, 7) float32   env-local cube + plate poses at reset (pos, quat xyzw)
@@ -29,6 +30,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--episodes", type=int, default=100, help="Number of successful episodes to save.")
 parser.add_argument("--out", required=True)
 parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--dart_sigma", type=float, default=0.012, help="Max per-episode DART noise sigma [m]; 0 disables.")
 args, env_cfg = sim_app.parse(parser, TASK)
 env_cfg.seed = args.seed
 
@@ -46,7 +48,7 @@ with sim_app.launch(env_cfg, args):
     from so101_lang import language
     from so101_lang.envs.head import calibration_dict, head_in_base
     from so101_lang.envs.mdp import CUBE_NAMES, PLATE_NAMES
-    from so101_lang.expert.pick_place_sm import PickPlaceExpert, phase_skill
+    from so101_lang.expert.pick_place_sm import ExpertCfg, PickPlaceExpert, phase_skill
     from so101_lang.robots import frames
     from so101_lang.robots.so101 import STATE_NAMES, SO101Adapter
 
@@ -91,7 +93,7 @@ with sim_app.launch(env_cfg, args):
             "skip": True,
         }
 
-    expert = PickPlaceExpert(env.num_envs, env.step_dt, env.device)
+    expert = PickPlaceExpert(env.num_envs, env.step_dt, env.device, ExpertCfg(dart_sigma_max=args.dart_sigma))
     expert.reset()
     init = object_poses_local()
     buffers = [new_buffers(i, init) for i in range(env.num_envs)]

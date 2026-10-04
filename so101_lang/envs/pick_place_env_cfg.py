@@ -55,7 +55,7 @@ PLATE_TOP_Z = PLATE_HEIGHT + 0.001
 WORKSPACE_X = (0.13, 0.30)
 WORKSPACE_Y = (-0.13, 0.13)
 
-CAMERA_RES = 256
+CAMERA_RES = 512
 
 
 def look_at_world_quat(eye: tuple[float, float, float], target: tuple[float, float, float]) -> tuple[float, ...]:
@@ -75,8 +75,8 @@ def look_at_world_quat(eye: tuple[float, float, float], target: tuple[float, flo
 HEAD_CENTER = (-0.12, 0.20, 0.45)  # midpoint between the two optical centres, env-local [m]
 HEAD_TARGET = (0.21, -0.01, 0.0)  # point the head looks at
 STEREO_BASELINE = 0.06  # [m], typical of compact stereo cameras (ZED Mini 63 mm, D435 50 mm)
-STEREO_FOCAL_LENGTH = 24.0  # [mm]
-STEREO_APERTURE = 20.955  # horizontal aperture [mm] -> ~47 deg horizontal FOV
+STEREO_FOCAL_LENGTH = 32.0  # [mm]
+STEREO_APERTURE = 20.955  # horizontal aperture [mm] -> ~36 deg horizontal FOV
 
 
 def stereo_head_poses(center, target, baseline):

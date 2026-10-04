@@ -52,6 +52,10 @@ class ExpertCfg:
     release_time: float = 0.6  # [s]
     open_cmd: float = 0.35  # gripper closedness while approaching (0 = fully open)
     randomize: bool = True  # jitter heights / speed per episode for demo diversity
+    # DART-style noise injection: the executed command gets a smooth random offset while the recorded label
+    # (cmd_pos) stays clean, so demonstrations contain recoveries from being slightly off the nominal path.
+    dart_sigma_max: float = 0.0  # [m] per-episode sigma is drawn from U(0, dart_sigma_max); 0 disables
+    dart_corr: float = 0.9  # per-step correlation of the Ornstein-Uhlenbeck offset
 
 
 class PickPlaceExpert:
@@ -67,14 +71,18 @@ class PickPlaceExpert:
         self.hover = torch.full((num_envs,), self.cfg.hover_height, device=device)
         self.speed = torch.full((num_envs,), self.cfg.max_speed, device=device)
         self.initialized = torch.zeros(num_envs, dtype=torch.bool, device=device)
+        self.dart_sigma = torch.zeros(num_envs, device=device)
+        self.dart_offset = torch.zeros(num_envs, 3, device=device)
 
     def reset(self, env_ids: torch.Tensor | None = None):
         ids = slice(None) if env_ids is None else env_ids
         self.phase[ids] = Phase.APPROACH
         self.timer[ids] = 0.0
         self.initialized[ids] = False
+        k = self.phase[ids].numel()
+        self.dart_offset[ids] = 0.0
+        self.dart_sigma[ids] = torch.rand(k, device=self.device) * self.cfg.dart_sigma_max
         if self.cfg.randomize:
-            k = self.phase[ids].numel()
             self.hover[ids] = self.cfg.hover_height + (torch.rand(k, device=self.device) - 0.5) * 0.03
             self.speed[ids] = self.cfg.max_speed * (0.8 + 0.4 * torch.rand(k, device=self.device))
 
@@ -174,7 +182,19 @@ class PickPlaceExpert:
 
         # Exposed for recording: the commanded TCP pose (base frame) and gripper closedness.
         self.cmd_grip = grip
+        # DART: smooth offset on the *executed* target only; full in free-space phases, reduced near the
+        # object, off while closing / releasing so grasps and drops stay clean.
+        rho = self.cfg.dart_corr
+        noise = torch.randn_like(self.dart_offset) * self.dart_sigma.unsqueeze(-1) * (1 - rho**2) ** 0.5
+        self.dart_offset = rho * self.dart_offset + noise
+        scale = torch.zeros(self.n, device=self.device)
+        free = (self.phase == Phase.APPROACH) | (self.phase == Phase.LIFT) | (self.phase == Phase.CARRY)
+        near = (self.phase == Phase.DESCEND) | (self.phase == Phase.LOWER)
+        scale = torch.where(free, torch.ones_like(scale), scale)
+        scale = torch.where(near, torch.full_like(scale, 0.3), scale)
+        executed = self.cmd_pos + self.dart_offset * scale.unsqueeze(-1)
+
         # TCP target -> gripper-link target.
         goal_rot = math_utils.matrix_from_quat(self.grasp_quat)
-        body_pos = self.cmd_pos - (goal_rot @ self.tcp_offset.unsqueeze(-1)).squeeze(-1)
+        body_pos = executed - (goal_rot @ self.tcp_offset.unsqueeze(-1)).squeeze(-1)
         return torch.cat([body_pos, self.grasp_quat, grip.unsqueeze(-1)], dim=-1)
