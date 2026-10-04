@@ -30,6 +30,8 @@ import h5py
 import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
+from so101_lang.perception.stereo_depth import depth_to_pointmap, depth_to_rgb
+
 JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
 
 
@@ -52,10 +54,15 @@ def make_depth_backend(kind: str, calibration: dict):
     return None
 
 
-def features(height: int, width: int, state_names: list[str], with_depth: bool) -> dict:
+POINTMAP_SIZE = 64
+
+
+def features(height: int, width: int, state_names: list[str], with_depth: bool, with_pointmap: bool = False) -> dict:
     image = {"dtype": "video", "shape": (height, width, 3), "names": ["height", "width", "channels"]}
     vec = {"dtype": "float32", "shape": (len(state_names),), "names": state_names}
     depth = {"observation.images.depth": dict(image)} if with_depth else {}
+    if with_pointmap:
+        depth["observation.pointmap"] = {"dtype": "float32", "shape": (3, POINTMAP_SIZE, POINTMAP_SIZE), "names": None}
     return {
         "observation.images.left": image,
         "observation.images.right": dict(image),
@@ -74,7 +81,10 @@ def main():
     parser.add_argument("--repo_id", default="local/so101_stereo_ee")
     parser.add_argument("--max_episodes", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--depth", choices=DEPTH_KINDS, default="fast_foundationstereo")
+    parser.add_argument("--depth", choices=DEPTH_KINDS, default="fast_foundationstereo",
+                        help="Backend for the colormap depth camera (observation.images.depth); 'none' omits it.")
+    parser.add_argument("--pointmap", choices=DEPTH_KINDS, default="none",
+                        help="Backend for observation.pointmap, the (3,64,64) head-frame XYZ map for smolvla_depth.")
     args = parser.parse_args()
 
     root = Path(args.root)
@@ -83,7 +93,7 @@ def main():
             raise SystemExit(f"{root} exists; pass --overwrite to replace it")
         shutil.rmtree(root)
 
-    dataset, calibration, count, depth = None, None, 0, None
+    dataset, calibration, count, depth, pm_backend = None, None, 0, None, None
     for path in args.inputs:
         with h5py.File(path, "r") as h5:
             fps = int(h5.attrs["fps"])
@@ -91,6 +101,8 @@ def main():
             calibration = calibration or json.loads(h5.attrs["calibration"])
             if depth is None and args.depth != "none":
                 depth = make_depth_backend(args.depth, calibration)
+            if pm_backend is None and args.pointmap != "none":
+                pm_backend = depth if args.pointmap == args.depth else make_depth_backend(args.pointmap, calibration)
             for name in sorted(h5.keys()):
                 if args.max_episodes is not None and count >= args.max_episodes:
                     break
@@ -100,7 +112,7 @@ def main():
                     dataset = LeRobotDataset.create(
                         repo_id=args.repo_id,
                         fps=fps,
-                        features=features(*left.shape[1:3], list(h5.attrs["state_names"]), depth is not None),
+                        features=features(*left.shape[1:3], list(h5.attrs["state_names"]), depth is not None, pm_backend is not None),
                         root=root,
                         robot_type="so101_follower",
                         use_videos=True,
@@ -110,7 +122,15 @@ def main():
                 state, action = ep["state"][()], ep["action"][()]
                 joints, skill = ep["joint_pos"][()], ep["skill"][()]
                 for t in range(len(action)):
-                    extra = {"observation.images.depth": depth.depth_rgb(left[t], right[t])} if depth else {}
+                    extra = {}
+                    z = None
+                    if depth is not None:
+                        z = depth.depth(left[t], right[t])
+                        extra["observation.images.depth"] = depth_to_rgb(z, depth.cfg.near, depth.cfg.far)
+                    if pm_backend is not None:
+                        if z is None or pm_backend is not depth:
+                            z = pm_backend.depth(left[t], right[t])
+                        extra["observation.pointmap"] = depth_to_pointmap(z, calibration, POINTMAP_SIZE)
                     dataset.add_frame(
                         {
                             **extra,

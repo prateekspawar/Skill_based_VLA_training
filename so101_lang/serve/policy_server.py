@@ -20,7 +20,9 @@ import torch
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 
-from so101_lang.data.hdf5_to_lerobot import DEPTH_KINDS, make_depth_backend
+import so101_lang.policies.smolvla_depth  # noqa: F401  (registers smolvla_depth for loading)
+from so101_lang.data.hdf5_to_lerobot import DEPTH_KINDS, POINTMAP_SIZE, make_depth_backend
+from so101_lang.perception.stereo_depth import depth_to_pointmap, depth_to_rgb
 
 RENAME = {
     "observation.images.left": "observation.images.camera1",
@@ -46,9 +48,13 @@ def load_policy(checkpoint: str, depth_kind: str, calibration: str | None = None
         preprocessor_overrides={"device_processor": {"device": "cuda"}, "rename_observations_processor": {"rename_map": RENAME}},
     )
     depth = None
-    if "observation.images.camera3" in cfg.input_features and depth_kind != "none":
+    wants_camera = "observation.images.camera3" in cfg.input_features
+    wants_pointmap = getattr(cfg, "pointmap_key", None) is not None
+    if (wants_camera or wants_pointmap) and depth_kind != "none":
         calib_path = calibration or json.loads((ckpt / "train_config.json").read_text())["dataset"]["root"] + "/meta/stereo_calibration.json"
-        depth = make_depth_backend(depth_kind, json.loads(Path(calib_path).read_text()))
+        calib = json.loads(Path(calib_path).read_text())
+        depth = make_depth_backend(depth_kind, calib)
+        depth.uses = {"camera": wants_camera, "pointmap": wants_pointmap, "calibration": calib}
     return cfg, policy, pre, post, depth
 
 
@@ -60,7 +66,12 @@ def build_obs(msg: dict, depth) -> dict:
         "task": [msg["task"]],
     }
     if depth is not None:
-        obs["observation.images.depth"] = to_image(depth.depth_rgb(msg["left"], msg["right"]), "cuda")
+        z = depth.depth(msg["left"], msg["right"])
+        if depth.uses["camera"]:
+            obs["observation.images.depth"] = to_image(depth_to_rgb(z, depth.cfg.near, depth.cfg.far), "cuda")
+        if depth.uses["pointmap"]:
+            pm = depth_to_pointmap(z, depth.uses["calibration"], POINTMAP_SIZE)
+            obs["observation.pointmap"] = torch.from_numpy(pm).unsqueeze(0).cuda()
     return obs
 
 

@@ -203,3 +203,27 @@ def _load_tensorrt_libs() -> bool:
     except OSError:
         return False
     return True
+
+
+def depth_to_pointmap(depth: np.ndarray, calib: dict, out_size: int = 64) -> np.ndarray:
+    """Left-camera depth [m] -> (3, out_size, out_size) XYZ point map in the head frame [m]; 0 where unknown.
+
+    Pixels are back-projected with the pinhole intrinsics (optical frame: x right, y down, z forward),
+    moved to the head frame (x forward, y left, z up) using the left camera's offset, then area-averaged.
+    The head frame is the frame the VLA's state and actions live in, so depth and actions share coordinates.
+    """
+    k = calib["intrinsics"]
+    h, w = depth.shape
+    u, v = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    z = depth
+    x_c = (u + 0.5 - k["cx"]) / k["fx"] * z
+    y_c = (v + 0.5 - k["cy"]) / k["fy"] * z
+    off = calib["cameras"]["left"]["position_in_head"]
+    xyz = np.stack([z + off[0], -x_c + off[1], -y_c + off[2]], axis=0)
+    valid = np.isfinite(z)
+    xyz = np.where(valid[None], xyz, 0.0).astype(np.float32)
+    # Area-average valid points into the output grid.
+    f = h // out_size
+    xyz = xyz[:, : out_size * f, : out_size * f].reshape(3, out_size, f, out_size, f).sum((2, 4))
+    cnt = valid[: out_size * f, : out_size * f].reshape(out_size, f, out_size, f).sum((1, 3))
+    return np.where(cnt > 0, xyz / np.maximum(cnt, 1), 0.0).astype(np.float32)

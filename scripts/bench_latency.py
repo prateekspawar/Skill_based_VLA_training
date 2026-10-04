@@ -41,6 +41,8 @@ results = {}
 for kind in args.kinds:
     mem_before = gpu_mem_mb()
     depth = make_depth_backend(kind, calib) if kind != "none" else None
+    if depth is not None:
+        depth.uses = {"camera": True, "pointmap": False, "calibration": calib}
     t_depth, t_policy = [], []
     for q in range(args.queries + 3):  # first 3 are warm-up (engine load, cudnn autotune)
         i = q % len(data["left"])
