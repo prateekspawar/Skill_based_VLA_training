@@ -61,8 +61,20 @@ class TargetLocator:
         p, n = self.point_from_mask(self.depth.depth(left, right), mask, query)
         return p, {"box": box.tolist(), "score": score, "n_depth_px": n}
 
-    def point_from_mask(self, depth: np.ndarray, mask: np.ndarray, query: str) -> tuple[np.ndarray, int]:
-        """Median head-frame 3-D point of the masked pixels (pushed to the object centre for solid objects)."""
+    def point_from_mask(
+        self,
+        depth: np.ndarray,
+        mask: np.ndarray,
+        query: str,
+        exclude_points: np.ndarray | None = None,
+        exclude_radius: float = 0.035,
+        min_px: int = 1,
+    ) -> tuple[np.ndarray, int]:
+        """Median head-frame 3-D point of the masked pixels (pushed to the object centre for solid objects).
+
+        ``exclude_points`` (K, 3) are robot keypoints in the head frame; mask pixels whose 3-D point lies within
+        ``exclude_radius`` of any of them are dropped (robot self-filter).
+        """
         k = self.calib["intrinsics"]
         vs, us = np.nonzero(mask & np.isfinite(depth))
         if len(us) == 0:
@@ -72,10 +84,15 @@ class TargetLocator:
         xc, yc = (u - k["cx"]) / k["fx"] * d, (v - k["cy"]) / k["fy"] * d
         off = self.calib["cameras"]["left"]["position_in_head"]
         pts = np.stack([d + off[0], -xc + off[1], -yc + off[2]], axis=1)
+        if exclude_points is not None and len(exclude_points):
+            dist = np.linalg.norm(pts[:, None, :] - np.asarray(exclude_points)[None, :, :], axis=2).min(axis=1)
+            pts = pts[dist > exclude_radius]
+        if len(pts) < min_px:
+            raise RuntimeError(f"only {len(pts)} valid pixels left for '{query}'")
         p = np.median(pts, axis=0)
         ray = p - np.asarray(off)
         kind = next((k for k in OBJECT_HALF_DEPTH if k in query), None)
         if kind:
             p = p + ray / np.linalg.norm(ray) * OBJECT_HALF_DEPTH[kind]
-        return p.astype(np.float32), int(len(us))
+        return p.astype(np.float32), int(len(pts))
 

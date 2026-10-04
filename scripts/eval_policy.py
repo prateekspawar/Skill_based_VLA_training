@@ -105,10 +105,34 @@ with sim_app.launch(env_cfg, args):
         perception_err.append((skill, err))
         return reply["point"]
 
+    chain = ["base", "shoulder", "upper_arm", "lower_arm", "wrist", "gripper"]
+    chain_ids = [robot.find_bodies(n)[0][0] for n in chain]
+    jaw_id = robot.find_bodies("moving_jaw_so101_v1")[0][0]
+
+    def robot_points_head(head_b, step=0.01):
+        """Robot keypoints in the head frame: link origins along the chain, the moving jaw and the TCP,
+        densified every ``step`` metres (what forward kinematics would give on real hardware)."""
+        root_p, root_q = robot.data.root_pos_w.torch, robot.data.root_quat_w.torch
+        body_w = robot.data.body_pos_w.torch[0]
+        to_b = lambda w: math_utils.subtract_frame_transforms(root_p, root_q, w.unsqueeze(0))[0][0]
+        link_pos, link_quat = math_utils.subtract_frame_transforms(
+            root_p, root_q, robot.data.body_pos_w.torch[:, gi], robot.data.body_quat_w.torch[:, gi]
+        )
+        tcp, _ = adapter.tcp_from_link(link_pos, link_quat)
+        nodes = [to_b(body_w[i]) for i in chain_ids] + [tcp[0]]
+        segments = list(zip(nodes[:-1], nodes[1:])) + [(nodes[-2], to_b(body_w[jaw_id])), (to_b(body_w[jaw_id]), tcp[0])]
+        pts = []
+        for a, b in segments:
+            n = max(int(torch.linalg.norm(b - a) / step), 1)
+            pts += [a + (b - a) * k / n for k in range(n + 1)]
+        p_b = torch.stack(pts)
+        base_in_head = frames.invert_transform(head_b)[0]
+        return (p_b @ base_in_head[:3, :3].T + base_in_head[:3, 3]).cpu().numpy()
+
     def sam2_targets(cmd, cube, plate, head_b, frozen=()):
         """Start or update SAM2 tracking of the episode's pick cube and place plate; returns head-frame points."""
         queries = {"pick": language.cube_ref(cube), "place": language.plate_ref(plate)}
-        msg = {"cmd": cmd, "left": rgb("left_cam"), "right": rgb("right_cam")}
+        msg = {"cmd": cmd, "left": rgb("left_cam"), "right": rgb("right_cam"), "robot_points": robot_points_head(head_b)}
         if cmd == "sam2_start":
             msg["queries"] = [queries["pick"], queries["place"]]
         else:
@@ -173,8 +197,8 @@ with sim_app.launch(env_cfg, args):
         push_at = rng.uniform(0.6, 1.6)  # [s] into the pick skill
         outcome["push_mm"] = None
         done = False
-        for skill, text in steps:
-            conn.send({"cmd": "reset"})
+        for skill_i, (skill, text) in enumerate(steps):
+            conn.send({"cmd": "reset", "seed": args.seed * 100000 + ep * 10 + skill_i})
             conn.recv()
             # The target is fixed for the whole skill (cube before grasp, plate is static).
             target = oracle_target(skill, cube, plate, head_b) if args.target == "oracle" else None

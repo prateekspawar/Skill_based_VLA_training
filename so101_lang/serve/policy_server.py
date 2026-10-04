@@ -104,6 +104,8 @@ def main():
                         break
                     if msg.get("cmd") == "reset":
                         policy.reset()
+                        if msg.get("seed") is not None:  # reproducible flow-matching noise for paired comparisons
+                            torch.manual_seed(int(msg["seed"]))
                         conn.send({"ok": True})
                         continue
                     if msg.get("cmd") in ("locate", "sam2_start", "sam2_update"):  # perception -> 3-D points (head frame)
@@ -121,10 +123,13 @@ def main():
                             from so101_lang.perception.sam2_tracker import Sam2PointTracker
 
                             sam2 = Sam2PointTracker(locator)
+                        robot_points = msg.get("robot_points")  # robot keypoints (head frame) for the self-filter
                         if msg["cmd"] == "sam2_start":
-                            points, info = sam2.start(msg["left"], msg["right"], msg["queries"])
+                            points, info = sam2.start(msg["left"], msg["right"], msg["queries"], robot_points)
                         else:
-                            points, info = sam2.update(msg["left"], msg["right"], frozen=tuple(msg.get("frozen", ())))
+                            points, info = sam2.update(
+                                msg["left"], msg["right"], robot_points, frozen=tuple(msg.get("frozen", ()))
+                            )
                         conn.send({"points": points, "info": info, "t_locate": time.time() - t0})
                         continue
                     t0 = time.time()
