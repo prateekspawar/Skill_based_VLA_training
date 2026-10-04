@@ -3,3 +3,4 @@ datasets/
 checkpoints/
 __pycache__/
 *.egg-info/
+models/
