@@ -2,7 +2,7 @@
 
 Reuses the seated SO-101, the soft gripper actuator and the absolute-pose IK action from
 Isaac Lab's ``IsaacContrib-Stack-Cube-SO101-IK-Abs-v0`` config, and swaps in a scene with
-four coloured cubes, two coloured plates, a front camera and a wrist camera.
+four coloured cubes, two coloured plates and a stereo camera "head".
 
 Two action variants share everything else:
 
@@ -70,8 +70,48 @@ def look_at_world_quat(eye: tuple[float, float, float], target: tuple[float, flo
     return (-sy * sp, cy * sp, sy * cp, cy * cp)
 
 
-FRONT_CAM_EYE = (0.62, 0.0, 0.40)
-FRONT_CAM_TARGET = (0.20, 0.0, 0.0)
+# Stereo "head": two parallel pinhole cameras on one rigid mount, placed like a human head relative to
+# its right arm -- behind, above and to the left of the arm's shoulder, looking down at the workspace.
+HEAD_CENTER = (-0.12, 0.20, 0.45)  # midpoint between the two optical centres, env-local [m]
+HEAD_TARGET = (0.21, -0.01, 0.0)  # point the head looks at
+STEREO_BASELINE = 0.06  # [m], typical of compact stereo cameras (ZED Mini 63 mm, D435 50 mm)
+STEREO_FOCAL_LENGTH = 24.0  # [mm]
+STEREO_APERTURE = 20.955  # horizontal aperture [mm] -> ~47 deg horizontal FOV
+
+
+def stereo_head_poses(center, target, baseline):
+    """Left/right camera positions and their shared world-convention orientation (xyzw)."""
+    quat = look_at_world_quat(center, target)
+    fwd = np.asarray(target, dtype=float) - np.asarray(center, dtype=float)
+    yaw = math.atan2(fwd[1], fwd[0])
+    left_axis = np.array([-math.sin(yaw), math.cos(yaw), 0.0])  # camera +Y in world convention
+    c = np.asarray(center, dtype=float)
+    left = tuple((c + left_axis * baseline / 2).tolist())
+    right = tuple((c - left_axis * baseline / 2).tolist())
+    return left, right, quat
+
+
+LEFT_CAM_POS, RIGHT_CAM_POS, HEAD_QUAT = stereo_head_poses(HEAD_CENTER, HEAD_TARGET, STEREO_BASELINE)
+
+
+def _stereo_cam_cfg(name: str, pos) -> CameraCfg:
+    return CameraCfg(
+        prim_path=f"{{ENV_REGEX_NS}}/StereoHead/{name}",
+        update_period=0.0,
+        height=CAMERA_RES,
+        width=CAMERA_RES,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=STEREO_FOCAL_LENGTH, horizontal_aperture=STEREO_APERTURE, clipping_range=(0.05, 3.0)
+        ),
+        offset=CameraCfg.OffsetCfg(pos=pos, rot=HEAD_QUAT, convention="world"),
+    )
+
+
+def stereo_intrinsics() -> dict:
+    """Pinhole intrinsics shared by both cameras (square pixels, principal point at the centre)."""
+    f_px = STEREO_FOCAL_LENGTH / STEREO_APERTURE * CAMERA_RES
+    return {"width": CAMERA_RES, "height": CAMERA_RES, "fx": f_px, "fy": f_px, "cx": CAMERA_RES / 2, "cy": CAMERA_RES / 2}
 
 _OBJECT_RIGID_PROPS = [
     PhysxRigidBodyCfg(
@@ -125,7 +165,7 @@ def _plate_cfg(j: int) -> RigidObjectCfg:
 
 @configclass
 class PickPlaceSceneCfg(InteractiveSceneCfg):
-    """Table, SO-101, four cubes, two plates, front + wrist cameras."""
+    """Table, SO-101, four cubes, two plates and a stereo head camera."""
 
     robot: ArticulationCfg = MISSING
     ee_frame: FrameTransformerCfg = MISSING
@@ -152,31 +192,8 @@ class PickPlaceSceneCfg(InteractiveSceneCfg):
     plate_0 = _plate_cfg(0)
     plate_1 = _plate_cfg(1)
 
-    front_cam = CameraCfg(
-        prim_path="{ENV_REGEX_NS}/front_cam",
-        update_period=0.0,
-        height=CAMERA_RES,
-        width=CAMERA_RES,
-        data_types=["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=24.0, horizontal_aperture=20.955, clipping_range=(0.05, 3.0)
-        ),
-        offset=CameraCfg.OffsetCfg(
-            pos=FRONT_CAM_EYE, rot=look_at_world_quat(FRONT_CAM_EYE, FRONT_CAM_TARGET), convention="world"
-        ),
-    )
-    # At the lens of the stock SO-101 wrist camera mount (gripper +Y side), looking along the jaws (gripper -Z) tilted 25 deg toward them.
-    wrist_cam = CameraCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/gripper/wrist_cam",
-        update_period=0.0,
-        height=CAMERA_RES,
-        width=CAMERA_RES,
-        data_types=["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=10.0, horizontal_aperture=20.955, clipping_range=(0.01, 2.0)
-        ),
-        offset=CameraCfg.OffsetCfg(pos=(-0.002, 0.056, -0.066), rot=(0.9763, 0.0, 0.0, 0.2164), convention="ros"),
-    )
+    left_cam = _stereo_cam_cfg("left_cam", LEFT_CAM_POS)
+    right_cam = _stereo_cam_cfg("right_cam", RIGHT_CAM_POS)
 
 
 @configclass

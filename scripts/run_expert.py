@@ -1,4 +1,4 @@
-"""Run the scripted expert, report its success rate and save a front-camera video of env 0.
+"""Run the scripted expert, report its success rate and save a left-camera video of env 0.
 
     ~/isaacsim/bin/python scripts/run_expert.py --num_envs 16 --episodes 64 [--viz kit]
 """
@@ -85,7 +85,7 @@ with sim_app.launch(env_cfg, args):
                     cube = obs["privileged"][i].view(-1, 7)[env.pp_task[i, 0]]
                     stats["lifted"] += int(cube[2] > expert.pick_pos[i, 2] + 0.03)
         if recording:
-            frames.append(env.scene["front_cam"].data.output["rgb"][0, ..., :3].cpu().numpy())
+            frames.append(env.scene["left_cam"].data.output["rgb"][0, ..., :3].cpu().numpy())
         ended = (terminated | truncated).nonzero().flatten()
         if len(ended):
             success = env.termination_manager.get_term("success")[ended]
@@ -96,7 +96,7 @@ with sim_app.launch(env_cfg, args):
                     fail_phase[Phase(int(phase_before[i])).name] += 1
                 if i == 0 and recording:
                     imageio.mimsave(f"{args.out}/env0_episode.mp4", frames, fps=int(1 / env.step_dt))
-                    print(f"[expert] saved video ({language.instruction(*task_before)}), success={bool(ok)}")
+                    print(f"[expert] saved video ({language.goal_instruction(*task_before)}), success={bool(ok)}")
                     recording = False
             expert.reset(ended)
     print(f"[expert] tcp_offset={cfg.tcp_offset} success {successes}/{done_eps} = {successes / done_eps:.1%}")

@@ -1,17 +1,22 @@
-"""Generate language-labelled pick-and-place demonstrations with the scripted expert.
+"""Generate skill-labelled pick-and-place demonstrations with the scripted expert.
 
-Only successful episodes are kept. The first step after a reset (stale camera render) and the
-terminal step (its joint target is read after the auto-reset) are dropped. Each episode is one HDF5 group:
+Observations come from the stereo head; state and action are robot-agnostic 10-D end-effector vectors
+in the head frame (see :mod:`so101_lang.robots.so101`). Every frame is labelled with the skill being
+executed (``pick`` until the cube is lifted, then ``place``) and that skill's natural-language step.
+
+Only successful episodes are kept; the first step after a reset (stale camera render) is dropped.
 
     /episode_000042
-        attrs: instruction, cube_idx, plate_idx
-        front_rgb  (T, H, W, 3) uint8      wrist_rgb (T, H, W, 3) uint8
-        state      (T, 6) float32           joint positions [rad] before the step
-        action     (T, 6) float32           joint position targets [rad] applied during the step
-        init_poses (K, 7) float32           env-local cube + plate poses at reset (pos, quat xyzw)
-    root attrs: fps, joint_names, object_names
+        attrs: goal, cube_idx, plate_idx, pick_text, place_text
+        left_rgb, right_rgb (T, H, W, 3) uint8
+        state     (T, 10) float32   measured TCP pose (head frame, pos + rot6d) + gripper opening
+        action    (T, 10) float32   commanded TCP pose (head frame) + commanded gripper opening
+        joint_pos (T, 6)  float32   SO-101 joint angles [rad] (reference only)
+        skill     (T,)    uint8     0 = pick, 1 = place
+        init_poses (K, 7) float32   env-local cube + plate poses at reset (pos, quat xyzw)
+    root attrs: fps, state_names, skills, calibration (JSON)
 
-    ~/isaacsim/bin/python scripts/gen_demos.py --num_envs 16 --episodes 200 --out datasets/raw/demos_000.h5
+    ~/isaacsim/bin/python scripts/gen_demos.py --num_envs 16 --episodes 2000 --out datasets/raw/stereo_ee.h5
 """
 
 import argparse
@@ -28,6 +33,7 @@ args, env_cfg = sim_app.parse(parser, TASK)
 env_cfg.seed = args.seed
 
 with sim_app.launch(env_cfg, args):
+    import json
     import random
     import time
 
@@ -38,8 +44,11 @@ with sim_app.launch(env_cfg, args):
     import isaaclab.utils.math as math_utils
 
     from so101_lang import language
+    from so101_lang.envs.head import calibration_dict, head_in_base
     from so101_lang.envs.mdp import CUBE_NAMES, PLATE_NAMES
-    from so101_lang.expert.pick_place_sm import PickPlaceExpert
+    from so101_lang.expert.pick_place_sm import PickPlaceExpert, phase_skill
+    from so101_lang.robots import frames
+    from so101_lang.robots.so101 import STATE_NAMES, SO101Adapter
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -48,6 +57,8 @@ with sim_app.launch(env_cfg, args):
     robot = env.scene["robot"]
     gripper_idx = robot.find_bodies("gripper")[0][0]
     objects = CUBE_NAMES + PLATE_NAMES
+    adapter = SO101Adapter()
+    skill_ids = {name: i for i, name in enumerate(language.SKILLS)}
 
     def gripper_pose_b():
         pos, quat = math_utils.subtract_frame_transforms(
@@ -71,10 +82,12 @@ with sim_app.launch(env_cfg, args):
     def new_buffers(i, init_poses):
         cube, plate = env.pp_task[i].tolist()
         return {
-            "instruction": language.random_train_instruction(cube, plate),
             "task": (cube, plate),
+            "goal": language.goal_instruction(cube, plate),
+            "pick_text": language.random_skill_text("pick", object=language.cube_ref(cube)),
+            "place_text": language.random_skill_text("place", target=language.plate_ref(plate)),
             "init_poses": init_poses[i],
-            "front": [], "wrist": [], "state": [], "action": [],
+            "left": [], "right": [], "state": [], "action": [], "joint_pos": [], "skill": [],
             "skip": True,
         }
 
@@ -82,28 +95,39 @@ with sim_app.launch(env_cfg, args):
     expert.reset()
     init = object_poses_local()
     buffers = [new_buffers(i, init) for i in range(env.num_envs)]
+    head_b = head_in_base(env)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     h5 = h5py.File(args.out, "w")
     h5.attrs["fps"] = round(1 / env.step_dt)
-    h5.attrs["joint_names"] = robot.joint_names
-    h5.attrs["object_names"] = objects
+    h5.attrs["state_names"] = STATE_NAMES
+    h5.attrs["skills"] = list(language.SKILLS)
+    h5.attrs["calibration"] = json.dumps(calibration_dict(head_b[0]))
     saved, attempted, t0 = 0, 0, time.time()
 
     torch.inference_mode().__enter__()
     while saved < args.episodes:
-        front, wrist = rgb("front_cam"), rgb("wrist_cam")
-        state = obs["policy"]["joint_pos"].cpu().numpy()
-        action = expert.act(obs["privileged"], env.pp_task, gripper_pose_b())
-        obs, _, terminated, truncated, _ = env.step(action)
-        target = robot.data.joint_pos_target.torch.cpu().numpy()
+        left, right = rgb("left_cam"), rgb("right_cam")
+        link = gripper_pose_b()
+        joint_pos = robot.data.joint_pos.torch
+        state = adapter.state(link[:, :3], link[:, 3:7], joint_pos[:, 5], head_b).cpu().numpy()
+        phase = expert.phase.clone()
+        ik_action = expert.act(obs["privileged"], env.pp_task, link)
+        # Record the expert's command in the robot-agnostic form: commanded TCP pose + opening.
+        cmd = adapter.to_agnostic(
+            expert.cmd_pos, frames.quat_to_matrix(expert.grasp_quat), 1.0 - expert.cmd_grip, head_b
+        ).cpu().numpy()
+        joint_np = joint_pos.cpu().numpy()
+        obs, _, terminated, truncated, _ = env.step(ik_action)
         for i, buf in enumerate(buffers):
             if buf.pop("skip", False):
                 continue  # frame 0 after a reset still shows the previous layout (stale render)
-            buf["front"].append(front[i])
-            buf["wrist"].append(wrist[i])
+            buf["left"].append(left[i])
+            buf["right"].append(right[i])
             buf["state"].append(state[i])
-            buf["action"].append(target[i])
+            buf["action"].append(cmd[i])
+            buf["joint_pos"].append(joint_np[i])
+            buf["skill"].append(skill_ids[phase_skill(int(phase[i]))])
 
         ended = (terminated | truncated).nonzero().flatten()
         if len(ended) == 0:
@@ -113,18 +137,17 @@ with sim_app.launch(env_cfg, args):
         for i in ended.tolist():
             attempted += 1
             buf = buffers[i]
-            # The terminal step's target is read after the auto-reset (home pose), so drop that step.
-            for key in ("front", "wrist", "state", "action"):
-                buf[key] = buf[key][:-1]
             if success[i] and saved < args.episodes and len(buf["action"]) > 10:
                 g = h5.create_group(f"episode_{saved:06d}")
-                g.attrs["instruction"] = buf["instruction"]
+                for key in ("goal", "pick_text", "place_text"):
+                    g.attrs[key] = buf[key]
                 g.attrs["cube_idx"], g.attrs["plate_idx"] = buf["task"]
-                for key, name in (("front", "front_rgb"), ("wrist", "wrist_rgb")):
+                for key, name in (("left", "left_rgb"), ("right", "right_rgb")):
                     arr = np.stack(buf[key])
                     g.create_dataset(name, data=arr, chunks=(1, *arr.shape[1:]), compression="gzip", compression_opts=4)
-                g.create_dataset("state", data=np.stack(buf["state"]).astype(np.float32))
-                g.create_dataset("action", data=np.stack(buf["action"]).astype(np.float32))
+                for key in ("state", "action", "joint_pos"):
+                    g.create_dataset(key, data=np.stack(buf[key]).astype(np.float32))
+                g.create_dataset("skill", data=np.asarray(buf["skill"], dtype=np.uint8))
                 g.create_dataset("init_poses", data=buf["init_poses"])
                 saved += 1
                 if saved % 10 == 0:

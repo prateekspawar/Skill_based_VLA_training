@@ -13,24 +13,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--out", default="outputs/probe")
 parser.add_argument("--steps", type=int, default=40)
 parser.add_argument("--geometry", action="store_true", help="Print gripper/jaw collision boxes in the gripper frame.")
-parser.add_argument("--wrist_candidates", action="store_true", help="Add extra wrist cameras to compare mounts.")
 args, env_cfg = sim_app.parse(parser, TASK)
-
-# Candidate mounts in the gripper-link frame (ROS convention, looking along gripper -Z = the jaws).
-CANDIDATES = {
-    "wc_px": (0.04, 0.0, -0.01),
-    "wc_nx": (-0.04, 0.0, -0.01),
-    "wc_py": (0.0, 0.04, -0.01),
-    "wc_ny": (0.0, -0.04, -0.01),
-    "wc_z": (0.0, 0.0, -0.03),
-}
-if args.wrist_candidates:
-    for name, pos in CANDIDATES.items():
-        cam = env_cfg.scene.wrist_cam.replace(
-            prim_path=f"{{ENV_REGEX_NS}}/Robot/gripper/{name}",
-            offset=env_cfg.scene.wrist_cam.offset.replace(pos=pos, rot=(1.0, 0.0, 0.0, 0.0)),
-        )
-        setattr(env_cfg.scene, name, cam)
 
 with sim_app.launch(env_cfg, args):
     import numpy as np
@@ -69,7 +52,7 @@ with sim_app.launch(env_cfg, args):
         print(f"   axes in base frame (columns x,y,z):\n{rot.round(3)}")
     print("joint_pos:", obs["policy"]["joint_pos"][0].cpu().numpy().round(3))
     task = env.pp_task[0].tolist()
-    print("task:", task, "->", language.instruction(*task))
+    print("task:", task, "->", language.goal_instruction(*task))
     objs = obs["privileged"][0].view(-1, 7).cpu().numpy().round(3)
     for name, row in zip(
         [f"{c} cube" for c in language.CUBE_NAMES] + [f"{p} plate" for p in language.PLATE_NAMES], objs
@@ -105,7 +88,7 @@ with sim_app.launch(env_cfg, args):
         report_geometry("usd")
 
     os.makedirs(args.out, exist_ok=True)
-    for cam in ["front_cam", "wrist_cam"] + (list(CANDIDATES) if args.wrist_candidates else []):
+    for cam in ["left_cam", "right_cam"]:
         rgb = env.scene[cam].data.output["rgb"][0].cpu().numpy()
         Image.fromarray(rgb[..., :3].astype(np.uint8)).save(f"{args.out}/{cam}.png")
     print("saved images to", os.path.abspath(args.out))

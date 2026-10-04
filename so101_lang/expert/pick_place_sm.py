@@ -21,6 +21,8 @@ from so101_lang import language
 
 
 class Phase(IntEnum):
+    """Expert phases. APPROACH..LIFT execute the ``pick`` skill, CARRY..RETREAT the ``place`` skill."""
+
     APPROACH = 0
     DESCEND = 1
     CLOSE = 2
@@ -30,6 +32,10 @@ class Phase(IntEnum):
     RELEASE = 6
     RETREAT = 7
     DONE = 8
+
+
+def phase_skill(phase: int) -> str:
+    return "pick" if phase <= Phase.LIFT else "place"
 
 
 @dataclass
@@ -166,6 +172,8 @@ class PickPlaceExpert:
         self.phase = torch.where(advance, self.phase + 1, self.phase)
         self.timer = torch.where(advance, torch.zeros_like(self.timer), self.timer)
 
+        # Exposed for recording: the commanded TCP pose (base frame) and gripper closedness.
+        self.cmd_grip = grip
         # TCP target -> gripper-link target.
         goal_rot = math_utils.matrix_from_quat(self.grasp_quat)
         body_pos = self.cmd_pos - (goal_rot @ self.tcp_offset.unsqueeze(-1)).squeeze(-1)

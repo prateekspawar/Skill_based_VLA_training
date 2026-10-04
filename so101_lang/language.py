@@ -1,9 +1,17 @@
-"""Object vocabulary and instruction templates shared by the sim, data export, planner and benchmark.
+"""Object vocabulary and the robot skill registry, shared by the sim, data export, planner and benchmark.
 
 Pure Python (no Isaac / torch imports) so both venvs can use it.
+
+The planner LLM may only emit calls to the skills in :data:`SKILLS`. Each call is rendered into a
+short natural-language step (``skill_text``) which is what the VLA is trained and prompted with, so
+one VLA learns every skill and the planner composes them.
 """
 
+from __future__ import annotations
+
+import json
 import random
+from dataclasses import dataclass, field
 
 # Slot order matters: cube ``i`` in the scene is ``CUBE_COLORS[i]``, plate ``j`` is ``PLATE_COLORS[j]``.
 CUBE_COLORS: dict[str, tuple[float, float, float]] = {
@@ -21,36 +29,83 @@ PLATE_NAMES = list(PLATE_COLORS)
 NUM_CUBES = len(CUBE_NAMES)
 NUM_PLATES = len(PLATE_NAMES)
 
-# Canonical template: the planner always emits steps in this exact form, so it is what the
-# executor policy must understand best.
-CANONICAL_TEMPLATE = "put the {cube} cube on the {plate} plate"
+# Object references the planner may use as skill arguments.
+OBJECT_REFS = [f"{c} cube" for c in CUBE_NAMES]
+TARGET_REFS = [f"{p} plate" for p in PLATE_NAMES]
 
-# Paraphrases seen during training (canonical included).
-TRAIN_TEMPLATES = [
-    CANONICAL_TEMPLATE,
-    "place the {cube} cube on the {plate} plate",
-    "pick up the {cube} cube and put it on the {plate} plate",
-    "move the {cube} block onto the {plate} plate",
-]
 
-# Paraphrases never seen in training, used by the "reworded instruction" benchmark suite.
-HELDOUT_TEMPLATES = [
-    "could you set the {cube} block down on the {plate} dish",
-    "grab the {cube} one and drop it onto the {plate} plate",
-    "the {cube} cube belongs on the {plate} plate",
-]
+@dataclass(frozen=True)
+class Skill:
+    name: str
+    description: str
+    params: dict[str, list[str]]  # parameter name -> allowed values
+    canonical: str  # template the executor uses at run time
+    train_templates: list[str] = field(default_factory=list)  # paraphrases seen in training (canonical included)
+    heldout_templates: list[str] = field(default_factory=list)  # paraphrases reserved for the benchmark
 
-# (cube, plate) pairs held out of training for the "new combination" benchmark suite.
+
+SKILLS: dict[str, Skill] = {
+    "pick": Skill(
+        name="pick",
+        description="Grasp the given object from the table and lift it. The gripper must be empty.",
+        params={"object": OBJECT_REFS},
+        canonical="pick up the {object}",
+        train_templates=["pick up the {object}", "grab the {object}", "grasp the {object} and lift it"],
+        heldout_templates=["get hold of the {object}", "lift the {object} off the table"],
+    ),
+    "place": Skill(
+        name="place",
+        description="Put the object currently held in the gripper onto the given target and release it.",
+        params={"target": TARGET_REFS},
+        canonical="place it on the {target}",
+        train_templates=["place it on the {target}", "put it down on the {target}", "set it on the {target}"],
+        heldout_templates=["drop it onto the {target}", "release it over the {target}"],
+    ),
+}
+
+# (cube, plate) pairs never sampled as a training episode; used by the "new combination" benchmark suite.
 HELDOUT_PAIRS = {("yellow", "pink"), ("green", "white")}
 
 
-def instruction(cube_idx: int, plate_idx: int, template: str = CANONICAL_TEMPLATE) -> str:
-    return template.format(cube=CUBE_NAMES[cube_idx], plate=PLATE_NAMES[plate_idx])
+def skill_text(skill: str, template: str | None = None, **args: str) -> str:
+    """Render a skill call such as ``skill_text("pick", object="red cube")`` into the VLA step text."""
+    s = SKILLS[skill]
+    if set(args) != set(s.params):
+        raise ValueError(f"{skill} expects {sorted(s.params)}, got {sorted(args)}")
+    for k, v in args.items():
+        if v not in s.params[k]:
+            raise ValueError(f"{skill}: {k}={v!r} not in {s.params[k]}")
+    return (template or s.canonical).format(**args)
 
 
-def random_train_instruction(cube_idx: int, plate_idx: int, rng: random.Random | None = None) -> str:
+def random_skill_text(skill: str, rng: random.Random | None = None, heldout: bool = False, **args: str) -> str:
     rng = rng or random
-    return instruction(cube_idx, plate_idx, rng.choice(TRAIN_TEMPLATES))
+    s = SKILLS[skill]
+    return skill_text(skill, rng.choice(s.heldout_templates if heldout else s.train_templates), **args)
+
+
+def skills_schema() -> str:
+    """JSON description of the callable skills, given to the planner LLM as its function list."""
+    return json.dumps(
+        [
+            {"name": s.name, "description": s.description, "parameters": {k: {"enum": v} for k, v in s.params.items()}}
+            for s in SKILLS.values()
+        ],
+        indent=2,
+    )
+
+
+def cube_ref(cube_idx: int) -> str:
+    return OBJECT_REFS[cube_idx]
+
+
+def plate_ref(plate_idx: int) -> str:
+    return TARGET_REFS[plate_idx]
+
+
+def goal_instruction(cube_idx: int, plate_idx: int) -> str:
+    """High-level user instruction for one pick-and-place episode (what the planner receives)."""
+    return f"put the {cube_ref(cube_idx)} on the {plate_ref(plate_idx)}"
 
 
 def train_pairs() -> list[tuple[int, int]]:
