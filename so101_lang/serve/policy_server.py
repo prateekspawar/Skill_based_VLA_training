@@ -23,6 +23,7 @@ from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 import so101_lang.policies.smolvla_depth  # noqa: F401  (registers smolvla_depth for loading)
 from so101_lang.data.hdf5_to_lerobot import DEPTH_KINDS, POINTMAP_SIZE, make_depth_backend
 from so101_lang.perception.stereo_depth import depth_to_pointmap, depth_to_rgb
+from so101_lang.perception.tracker import TargetTracker
 
 RENAME = {
     "observation.images.left": "observation.images.camera1",
@@ -89,7 +90,8 @@ def main():
 
     ckpt = Path(args.checkpoint)
     cfg, policy, pre, post, depth = load_policy(args.checkpoint, args.depth, args.calibration)
-    locator = None  # created on the first "locate" request
+    locator = None  # created on the first "locate"/"track" request
+    trackers: dict[str, TargetTracker] = {}
     print(f"[server] {cfg.type} loaded from {ckpt}; depth={'on' if depth else 'off'}; listening on :{args.port}", flush=True)
 
     with Listener(("localhost", args.port), authkey=AUTHKEY) as listener:
@@ -105,7 +107,11 @@ def main():
                         policy.reset()
                         conn.send({"ok": True})
                         continue
-                    if msg.get("cmd") == "locate":  # perception: object name -> 3-D point (head frame)
+                    if msg.get("cmd") == "track_reset":
+                        trackers.clear()
+                        conn.send({"ok": True})
+                        continue
+                    if msg.get("cmd") in ("locate", "track"):  # perception: object name -> 3-D point (head frame)
                         if locator is None:
                             from so101_lang.perception.locate import TargetLocator
 
@@ -113,7 +119,12 @@ def main():
                             locator = TargetLocator(json.loads(Path(calib_path).read_text()))
                         t0 = time.time()
                         point, info = locator.locate(msg["left"], msg["right"], msg["query"])
-                        conn.send({"point": point, **info, "t_locate": time.time() - t0})
+                        reply = {"point": point, "raw": point, **info, "t_locate": time.time() - t0}
+                        if msg["cmd"] == "track":  # fuse into the per-object Kalman track
+                            tr = trackers.setdefault(msg["query"], TargetTracker())
+                            reply["status"] = tr.update(point, info["score"], msg["t"])
+                            reply["point"] = tr.position
+                        conn.send(reply)
                         continue
                     t0 = time.time()
                     obs = build_obs(msg, depth)

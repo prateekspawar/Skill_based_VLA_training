@@ -20,8 +20,13 @@ parser.add_argument("--exec_steps", type=int, default=10, help="Actions executed
 parser.add_argument("--step_timeout", type=float, default=12.0, help="Seconds allowed per skill.")
 parser.add_argument("--port", type=int, default=6000)
 parser.add_argument("--heldout_pairs", action="store_true", help="Sample only the held-out (cube, plate) pairs.")
-parser.add_argument("--target", choices=["none", "oracle", "perception"], default="none",
-                    help="Send the skill's target point (head frame): from simulator ground truth or from perception.")
+parser.add_argument("--target", choices=["none", "oracle", "perception", "tracked", "oracle_tracked"], default="none",
+                    help="Skill target point (head frame): oracle = simulator truth at skill start; perception = OWLv2 + "
+                         "stereo once at episode start; tracked = perception re-run every query and fused by a Kalman "
+                         "tracker; oracle_tracked = simulator truth refreshed every query (upper bound).")
+parser.add_argument("--push", action="store_true",
+                    help="Moving-target test: during pick, teleport the target cube 3-6 cm while the gripper is still away.")
+parser.add_argument("--seed", type=int, default=0, help="Seeds layouts and pushes so runs are comparable.")
 parser.add_argument("--video_out", default="outputs/eval/episode0.mp4", help="Left-camera video of episode 0.")
 args, env_cfg = sim_app.parse(parser, TASK)
 env_cfg.scene.num_envs = 1
@@ -41,8 +46,16 @@ with sim_app.launch(env_cfg, args):
     from so101_lang.robots import frames
     from so101_lang.robots.so101 import SO101Adapter
 
+    import random
+
+    from so101_lang.envs.mdp import CUBE_NAMES, PLATE_NAMES
+    from so101_lang.envs.pick_place_env_cfg import CUBE_Z, PLATE_RADIUS, WORKSPACE_X, WORKSPACE_Y
+
     if args.heldout_pairs:
         env_cfg.events.reset_layout_and_task.params["pairs"] = language.heldout_pairs()
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    env_cfg.seed = args.seed
     env = sim_app.make_env(TASK, env_cfg)
     robot = env.scene["robot"]
     gi = robot.find_bodies("gripper")[0][0]
@@ -91,7 +104,41 @@ with sim_app.launch(env_cfg, args):
         perception_err.append((skill, err))
         return reply["point"]
 
+    def track_target(skill, cube, plate, head_b, sim_t):
+        """Re-run perception and fuse it into the server-side Kalman track for this skill's object."""
+        query = language.cube_ref(cube) if skill == "pick" else language.plate_ref(plate)
+        conn.send({"cmd": "track", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": query, "t": sim_t})
+        reply = conn.recv()
+        truth = oracle_target(skill, cube, plate, head_b)
+        perception_err.append((skill, 1000 * float(np.linalg.norm(reply["raw"] - truth))))
+        track_err.append((skill, 1000 * float(np.linalg.norm(reply["point"] - truth))))
+        track_status[reply["status"]] = track_status.get(reply["status"], 0) + 1
+        return reply["point"]
+
+    def push_cube(cube, rng):
+        """Teleport the target cube 3-6 cm in a random direction to a free spot in the workspace."""
+        obj = env.scene[f"cube_{cube}"]
+        origin = env.scene.env_origins[0]
+        pos = (obj.data.root_pos_w.torch[0] - origin).cpu().numpy()
+        others = [(env.scene[n].data.root_pos_w.torch[0] - origin).cpu().numpy() for n in CUBE_NAMES + PLATE_NAMES
+                  if n != f"cube_{cube}"]
+        clear = [0.045] * (len(CUBE_NAMES) - 1) + [PLATE_RADIUS + 0.025] * len(PLATE_NAMES)
+        for _ in range(100):
+            ang, dist = rng.uniform(0, 2 * np.pi), rng.uniform(0.03, 0.06)
+            new = pos[:2] + dist * np.array([np.cos(ang), np.sin(ang)])
+            if not (WORKSPACE_X[0] <= new[0] <= WORKSPACE_X[1] and WORKSPACE_Y[0] <= new[1] <= WORKSPACE_Y[1]):
+                continue
+            if all(np.linalg.norm(new - o[:2]) > c for o, c in zip(others, clear)):
+                p = torch.tensor([[new[0], new[1], CUBE_Z]], dtype=torch.float32, device=env.device) + origin
+                q = obj.data.root_quat_w.torch[0:1]
+                ids = torch.tensor([0], device=env.device)
+                obj.write_root_pose_to_sim_index(root_pose=torch.cat([p, q], -1).float(), env_ids=ids)
+                obj.write_root_velocity_to_sim_index(root_velocity=torch.zeros(1, 6, device=env.device), env_ids=ids)
+                return 1000 * dist
+        return None
+
     results, frames_out, latencies, perception_err = [], [], [], []
+    track_err, track_status = [], {}
     torch.inference_mode().__enter__()
     for ep in range(args.episodes):
         env.reset()
@@ -110,16 +157,31 @@ with sim_app.launch(env_cfg, args):
             {sk: perceive_target(sk, cube, plate, head_b) for sk in ("pick", "place")}
             if args.target == "perception" else {}
         )
+        ep_steps = 0
+        if args.target == "tracked":
+            conn.send({"cmd": "track_reset"})
+            conn.recv()
+            perceived = {sk: track_target(sk, cube, plate, head_b, 0.0) for sk in ("pick", "place")}
+        rng = np.random.default_rng(args.seed * 1000 + ep)
+        push_at = rng.uniform(0.6, 1.6)  # [s] into the pick skill
+        outcome["push_mm"] = None
         done = False
         for skill, text in steps:
             conn.send({"cmd": "reset"})
             conn.recv()
             # The target is fixed for the whole skill (cube before grasp, plate is static).
             target = oracle_target(skill, cube, plate, head_b) if args.target == "oracle" else None
-            if args.target == "perception":
+            if args.target in ("perception", "tracked"):
                 target = perceived[skill]
             t = 0
             while t < max_steps and not done:
+                # Dynamic targets: refresh before every query while the object can still move (pick: until
+                # the gripper starts closing on it; place: the plate, which normally stays put).
+                still_tracking = skill == "place" or outcome["close"] is None
+                if args.target == "tracked" and still_tracking and t > 0:
+                    target = track_target(skill, cube, plate, head_b, ep_steps * env.step_dt)
+                if args.target == "oracle_tracked" and still_tracking:
+                    target = oracle_target(skill, cube, plate, head_b)
                 reply_req = {"left": rgb("left_cam"), "right": rgb("right_cam"), "state": state_now(head_b)[0].cpu().numpy(), "task": text,
                              "target": target}
                 conn.send(reply_req)
@@ -132,8 +194,16 @@ with sim_app.launch(env_cfg, args):
                         d = torch.linalg.norm(cubes[:, :2] - tcp[:2], dim=1)
                         near = int(torch.argmin(d))
                         outcome["close"] = (1000 * float(d[cube]), 1000 * float(tcp[2] - cubes[cube, 2]), language.CUBE_NAMES[near])
+                        if target is not None:
+                            outcome["target_err_at_close"] = 1000 * float(np.linalg.norm(target - oracle_target("pick", cube, plate, head_b)))
                     _, _, term, trunc, _ = env.step(adapter.ik_command(a.unsqueeze(0), head_b))
                     t += 1
+                    ep_steps += 1
+                    if args.push and skill == "pick" and outcome["push_mm"] is None and t * env.step_dt >= push_at:
+                        tcp, cubes = tcp_and_cubes_b()
+                        if float(torch.linalg.norm(cubes[cube, :2] - tcp[:2])) > 0.06:
+                            outcome["push_mm"] = push_cube(cube, rng)
+                            rest_z = float(env.scene[cube_name].data.root_pos_w.torch[0, 2])
                     if ep == 0:
                         frames_out.append(rgb("left_cam"))
                     lifted = float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) > rest_z + 0.03
@@ -152,6 +222,10 @@ with sim_app.launch(env_cfg, args):
         results.append(outcome)
         close = outcome["close"]
         close_txt = (f"close: target dxy={close[0]:.0f}mm dz={close[1]:+.0f}mm nearest={close[2]}" if close else "never closed")
+        if outcome["push_mm"]:
+            close_txt += f" | pushed {outcome['push_mm']:.0f}mm"
+        if outcome.get("target_err_at_close") is not None:
+            close_txt += f" | target err at close {outcome['target_err_at_close']:.0f}mm"
         print(f"[eval] {ep:3d} '{outcome['goal']}': pick={'ok' if outcome['pick'] else 'FAIL'} "
               f"place={'ok' if outcome['place'] else 'FAIL'} | {close_txt}", flush=True)
         if ep == 0 and frames_out:
@@ -163,6 +237,20 @@ with sim_app.launch(env_cfg, args):
     full = sum(r["place"] for r in results)
     print(f"[eval] pick success {pick}/{n} = {pick / n:.0%}; full pick+place {full}/{n} = {full / n:.0%}; "
           f"mean server latency {1000 * np.mean(latencies):.0f} ms")
+    pushed = [r for r in results if r["push_mm"]]
+    if args.push:
+        print(f"[eval] pushes: {len(pushed)}/{n} episodes; pick success on pushed episodes "
+              f"{sum(r['pick'] for r in pushed)}/{len(pushed)}, full {sum(r['place'] for r in pushed)}/{len(pushed)}")
+    errs_close = [r["target_err_at_close"] for r in results if r.get("target_err_at_close") is not None]
+    if errs_close:
+        print(f"[eval] target-point error when the gripper closes: median {np.median(errs_close):.0f} mm, "
+              f"max {np.max(errs_close):.0f} mm [{len(errs_close)}]")
+    if track_err:
+        for sk in ("pick", "place"):
+            e = [x for s_, x in track_err if s_ == sk]
+            if e:
+                print(f"[eval] tracked target error ({sk}): median {np.median(e):.0f} mm, max {np.max(e):.0f} mm [{len(e)}]")
+        print(f"[eval] tracker updates: {track_status}")
     if perception_err:
         for sk in ("pick", "place"):
             e = [x for s_, x in perception_err if s_ == sk]
