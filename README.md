@@ -164,7 +164,9 @@ Key findings:
 - Wire in the LLM planner (Ollama qwen3-vl:8b, `skills_schema()` as the function list, validation, re-planning).
 - Full training run with the target point (current model is a 2,500-step fine-tune).
 - Better first detection (confidence / LLM verification).
-- ~~Train the VLA to follow moving targets~~ done in stage 1; stage 2 (separate pick / place models) running.
+- ~~Train the VLA to follow moving targets~~ done in stage 1 (combined pick + place model). Separate per-skill models
+  were considered and dropped: the combined model is the one carried forward. (Tooling remains:
+  `hdf5_to_lerobot --skill`, `build_targets --skill`, `policy_server --checkpoint_place`, `run_stage_per_skill.sh`.)
 - Rerun the depth comparison on the working recipe (no depth / colormap depth / native depth tokens).
 - Real robot: hand-eye calibration of the head (`head_in_base`), standalone IK, real stereo camera.
 
