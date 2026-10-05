@@ -137,7 +137,9 @@ OMNI_KIT_ACCEPT_EULA=YES ~/isaacsim/bin/python scripts/eval_policy.py --episodes
 | Target point, **static perception**, stationary objects | 38 % | 26 % |
 | Target point, **SAM2 tracking**, stationary objects | 38 % | 24 % |
 | Teleport push (unrealistic), any target source incl. oracle | 0 % on pushed episodes | — |
-| Sliding push | in progress | — |
+| Sliding push (3–6 cm over 0.5 s), **static perception** | 12 % | 6 % |
+| Sliding push, **SAM2 tracking** | **28 %** | **18 %** |
+| Sliding push, **oracle tracking** (true position refreshed every query) | 12 % | 10 % |
 
 Key findings:
 1. Without a target point, the VLA ignores the instruction's colour word (swapping the colour moves predictions
@@ -145,8 +147,10 @@ Key findings:
 2. Perception is accurate (cube ~2 mm, plate ~7–9 mm median), but about 1 in 10 episodes starts from a wrong
    OWLv2 detection (~200+ mm off); tracking cannot fix that.
 3. SAM2 tracking costs nothing on stationary scenes once the self-filter, checks and deadband are in.
-4. The VLA was trained only with targets that stay constant within a skill; even perfect (oracle) target updates
-   did not help on teleport pushes.
+4. The VLA was trained only with targets that stay constant within a skill. Under sliding pushes SAM2 tracking
+   (one deadbanded update after the cube moves; target 24 mm off at close vs 45 mm static) clearly beats static
+   perception, while *continuously* refreshed perfect targets (oracle) do worse than SAM2 — the VLA copes with one
+   step change but not with a target that keeps changing. Training with moving targets is the next fix.
 5. Stereo-depth image as a third camera: comparison was inconclusive (all variants under-trained); native depth
    branch (`smolvla_depth` with point map) is built but not yet evaluated.
 
