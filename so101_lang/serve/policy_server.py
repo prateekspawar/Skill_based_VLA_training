@@ -48,7 +48,13 @@ def load_policy(checkpoint: str, depth_kind: str, calibration: str | None = None
         preprocessor_overrides={"device_processor": {"device": "cuda"}, "rename_observations_processor": {"rename_map": RENAME}},
     )
     depth = None
-    wants_camera = "observation.images.camera3" in cfg.input_features
+    # The depth image goes to camera3 only if the model was trained that way (its rename map sends depth there);
+    # the base config always declares camera3, so input_features alone cannot tell.
+    try:
+        rename = json.loads((ckpt / "train_config.json").read_text()).get("rename_map") or {}
+    except FileNotFoundError:
+        rename = {}
+    wants_camera = rename.get("observation.images.depth") == "observation.images.camera3"
     wants_pointmap = getattr(cfg, "use_depth_branch", False)
     if (wants_camera or wants_pointmap) and depth_kind != "none":
         calib_path = calibration or json.loads((ckpt / "train_config.json").read_text())["dataset"]["root"] + "/meta/stereo_calibration.json"
