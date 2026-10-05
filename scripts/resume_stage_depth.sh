@@ -10,11 +10,11 @@ PY=~/lerobot-env/bin/python
 
 log "merge workaround: stripping point maps"
 for p in static moving; do
+  [[ -f $L/s512_${p}_depth_nopm/meta/info.json ]] && continue
   $PY -m so101_lang.data.pointmap_merge strip $L/s512_${p}_depth $L/s512_${p}_depth_nopm >> $OUT/pointmap.log 2>&1 \
     || { log "strip $p failed"; exit 1; }
 done
-rm -rf $L/s512_mix_depth_nopm
-~/lerobot-env/bin/lerobot-edit-dataset --operation.type=merge \
+[[ -f $L/s512_mix_depth_nopm/meta/info.json ]] || ~/lerobot-env/bin/lerobot-edit-dataset --operation.type=merge \
   --operation.repo_ids='["local/so101_stereo_ee", "local/so101_stereo_ee_moving"]' \
   --operation.roots="[\"$L/s512_static_depth_nopm\", \"$L/s512_moving_depth_nopm\"]" \
   --new_repo_id=local/so101_stereo_ee --new_root=$L/s512_mix_depth_nopm > $OUT/merge.log 2>&1 || { log "merge failed"; exit 1; }

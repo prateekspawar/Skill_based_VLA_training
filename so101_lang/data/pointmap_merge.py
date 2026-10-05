@@ -101,10 +101,12 @@ def attach(merged: Path, dst: Path, sources: list[Path]):
                 missing += 1
                 continue
             out[i] = maps[row]
-        t = t.append_column(KEY, _nested_list(out, col_type))
+        # Chunked column: one list array per 50k rows keeps the int32 list offsets in range for big files.
+        chunks = [_nested_list(out[i : i + 50_000], col_type) for i in range(0, len(out), 50_000)]
+        t = t.append_column(KEY, pa.chunked_array(chunks, type=col_type))
         o = dst / f.relative_to(merged)
         o.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(t, o)
+        pq.write_table(t, o, row_group_size=50_000)
     src_info = json.loads((sources[0] / "meta" / "info.json").read_text())
     info = json.loads((dst / "meta" / "info.json").read_text())
     info["features"][KEY] = src_info["features"][KEY]
