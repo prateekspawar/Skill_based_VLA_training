@@ -83,6 +83,8 @@ def main():
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--depth", choices=DEPTH_KINDS, default="fast_foundationstereo",
                         help="Backend for the colormap depth camera (observation.images.depth); 'none' omits it.")
+    parser.add_argument("--skill", choices=["all", "pick", "place"], default="all",
+                        help="Keep only the frames of one skill (each episode becomes that skill's segment).")
     parser.add_argument("--pointmap", choices=DEPTH_KINDS, default="none",
                         help="Backend for observation.pointmap, the (3,64,64) head-frame XYZ map for smolvla_depth.")
     args = parser.parse_args()
@@ -121,7 +123,12 @@ def main():
                 texts = {"pick": str(ep.attrs["pick_text"]), "place": str(ep.attrs["place_text"])}
                 state, action = ep["state"][()], ep["action"][()]
                 joints, skill = ep["joint_pos"][()], ep["skill"][()]
-                for t in range(len(action)):
+                frames_kept = range(len(action))
+                if args.skill != "all":
+                    frames_kept = np.nonzero(skill == skills.index(args.skill))[0]
+                    if len(frames_kept) < 5:
+                        continue
+                for t in frames_kept:
                     extra = {}
                     z = None
                     if depth is not None:

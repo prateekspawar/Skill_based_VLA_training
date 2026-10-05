@@ -209,7 +209,7 @@ with sim_app.launch(env_cfg, args):
         push = {"vel": None, "steps_left": 0, "start": None}
         done = False
         for skill_i, (skill, text) in enumerate(steps):
-            conn.send({"cmd": "reset", "seed": args.seed * 100000 + ep * 10 + skill_i})
+            conn.send({"cmd": "reset", "seed": args.seed * 100000 + ep * 10 + skill_i, "skill": skill})
             conn.recv()
             # The target is fixed for the whole skill (cube before grasp, plate is static).
             target = oracle_target(skill, cube, plate, head_b) if args.target == "oracle" else None

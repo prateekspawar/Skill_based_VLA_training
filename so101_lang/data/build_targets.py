@@ -82,6 +82,8 @@ def main():
     ap.add_argument("--pick_every", type=int, default=3)
     ap.add_argument("--place_every", type=int, default=10)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--skill", choices=["all", "pick", "place"], default="all",
+                    help="Must match the --skill used to convert --src (per-skill datasets).")
     args = ap.parse_args()
     rng = np.random.default_rng(args.seed)
     src, dst = Path(args.src), Path(args.dst)
@@ -95,7 +97,15 @@ def main():
     positions = []  # per global episode index
     for path in args.raw:
         with h5py.File(path, "r") as h5:
-            positions += [true_positions(h5[n], head_in_base) for n in sorted(h5.keys())]
+            for n in sorted(h5.keys()):
+                pos = true_positions(h5[n], head_in_base)
+                if args.skill != "all":  # per-skill datasets keep only that skill's frames (same rule as the converter)
+                    keep = h5[n]["skill"][()] == list(language.SKILLS).index(args.skill)
+                    if keep.sum() < 5:
+                        continue
+                    if len(pos) > 1:
+                        pos = pos[keep]
+                positions.append(pos)
 
     tables = [(f, pq.read_table(f)) for f in sorted((src / "data").rglob("*.parquet"))]
     all_states = []

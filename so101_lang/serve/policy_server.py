@@ -82,6 +82,8 @@ def build_obs(msg: dict, depth) -> dict:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True, help="Path to a pretrained_model directory")
+    parser.add_argument("--checkpoint_place", default=None,
+                        help="Optional separate model for the place skill (then --checkpoint serves pick).")
     parser.add_argument("--calibration", default=None, help="stereo_calibration.json (defaults to the training dataset's)")
     parser.add_argument("--depth", choices=DEPTH_KINDS, default="fast_foundationstereo")
     parser.add_argument("--port", type=int, default=6000)
@@ -89,6 +91,11 @@ def main():
 
     ckpt = Path(args.checkpoint)
     cfg, policy, pre, post, depth = load_policy(args.checkpoint, args.depth, args.calibration)
+    models = {"pick": (policy, pre, post)}
+    if args.checkpoint_place:
+        _, p_policy, p_pre, p_post, _ = load_policy(args.checkpoint_place, args.depth, args.calibration)
+        models["place"] = (p_policy, p_pre, p_post)
+    active = "pick"
     locator = None  # created on the first "locate"/"track" request
     sam2 = None  # SAM2 point tracker, created on the first "sam2_start" request
     print(f"[server] {cfg.type} loaded from {ckpt}; depth={'on' if depth else 'off'}; listening on :{args.port}", flush=True)
@@ -103,6 +110,8 @@ def main():
                     except EOFError:
                         break
                     if msg.get("cmd") == "reset":
+                        active = msg.get("skill", "pick") if msg.get("skill") in models else "pick"
+                        policy, pre, post = models[active]
                         policy.reset()
                         if msg.get("seed") is not None:  # reproducible flow-matching noise for paired comparisons
                             torch.manual_seed(int(msg["seed"]))
