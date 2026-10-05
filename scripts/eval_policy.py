@@ -29,7 +29,8 @@ parser.add_argument("--push", action="store_true",
                     help="Moving-target test: during pick, slide the target cube 3-6 cm over 0.5 s while the gripper is >6 cm away.")
 parser.add_argument("--seed", type=int, default=0, help="Seeds layouts and pushes so runs are comparable.")
 parser.add_argument("--sam2_every", type=int, default=3, help="Control steps between SAM2 updates during pick.")
-parser.add_argument("--video_out", default="outputs/eval/episode0.mp4", help="Left-camera video of episode 0.")
+parser.add_argument("--video_out", default="outputs/eval/episode0.mp4", help="Left-camera video of one episode.")
+parser.add_argument("--video_episode", type=int, default=0, help="Which episode to record to --video_out.")
 args, env_cfg = sim_app.parse(parser, TASK)
 env_cfg.scene.num_envs = 1
 env_cfg.episode_length_s = 2 * args.step_timeout + 2
@@ -272,7 +273,7 @@ with sim_app.launch(env_cfg, args):
                         tcp_h = state_now(head_b)[0, :3].cpu().numpy()
                         frozen = ("pick",) if np.linalg.norm(tcp_h - perceived["pick"]) < 0.05 else ()
                         perceived = sam2_targets("sam2_update", cube, plate, head_b, frozen + ("place",))
-                    if ep == 0:
+                    if ep == args.video_episode:
                         frames_out.append(rgb("left_cam"))
                     lifted = float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) > rest_z + 0.03
                     if skill == "pick" and lifted:
@@ -296,7 +297,7 @@ with sim_app.launch(env_cfg, args):
             close_txt += f" | target err at close {outcome['target_err_at_close']:.0f}mm"
         print(f"[eval] {ep:3d} '{outcome['goal']}': pick={'ok' if outcome['pick'] else 'FAIL'} "
               f"place={'ok' if outcome['place'] else 'FAIL'} | {close_txt}", flush=True)
-        if ep == 0 and frames_out:
+        if ep == args.video_episode and frames_out:
             os.makedirs(os.path.dirname(args.video_out), exist_ok=True)
             imageio.mimsave(args.video_out, frames_out, fps=round(1 / env.step_dt))
 
