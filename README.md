@@ -1,0 +1,182 @@
+# so101_lang — language-driven SO-101 manipulation (simulation-first, local)
+
+Natural-language pick-and-place on a single SO-101 arm, built and evaluated in Isaac Sim 6.1 / Isaac Lab 3.0
+on one RTX 5080 (16 GB). Everything runs locally.
+
+Design goals (from the project owner):
+- **Stereo "head" camera** (single mount, two cameras) placed like a human head relative to the arm.
+- **Planner LLM** turns the user's goal into calls to a fixed **skill list**; it may only emit those skills.
+- **VLA** executes one skill at a time and outputs a **robot-agnostic end-effector pose + gripper opening**.
+- **Robot-specific adapter + IK** turns that into joint angles, so the VLA is reusable across arms.
+
+---
+
+## 1. Architecture (as used now)
+
+```
+ user goal: "put the red cube on the pink plate"
+        │
+        ▼
+ ┌──────────────────────────────┐   NOT YET WIRED IN. Evaluation currently uses an *oracle planner*
+ │ Planner LLM (Ollama,         │   (scripts/eval_policy.py) that emits the two skills for the episode.
+ │ qwen3-vl:8b)                 │   Function list = language.skills_schema().
+ │ → [pick(object="red cube"),  │
+ │    place(target="pink plate")]│
+ └──────────────┬───────────────┘
+                │ per skill: step text  "pick up the red cube"  +  object name
+                ▼
+ ┌──────────────────────────────┐   so101_lang/perception/
+ │ Perception                    │   • OWLv2 (open-vocab detector) finds the named object in the LEFT image
+ │  stereo pair ─► FFS depth     │   • Fast-FoundationStereo (TensorRT FP16, 320 px, ~9 ms) → metric depth
+ │  ─► target 3-D point          │   • box/mask pixels + depth → 3-D point in the HEAD frame
+ │  (head frame)                 │   • targets: static (once at episode start)  or  SAM2 tracking
+ └──────────────┬───────────────┘
+                │ target point (x, y, z)
+                ▼
+ ┌──────────────────────────────┐   SmolVLA (450 M, LeRobot 0.6.1) via plugin "smolvla_depth"
+ │ VLA executor                  │   inputs : left + right 512² images, step text,
+ │                               │            13-D state = TCP pose (pos + rot6d) + gripper opening + target xyz
+ │                               │   output : 50-step chunk of 10-D actions (TCP pose + gripper opening),
+ │                               │            head frame, learned as offsets from the current state
+ └──────────────┬───────────────┘   (first 10 actions executed per query, then re-query)
+                │ 10-D head-frame action
+                ▼
+ ┌──────────────────────────────┐   so101_lang/robots/so101.py
+ │ SO101Adapter (robot-specific) │   head→base calibration, TCP offset on the gripper link,
+ │                               │   gripper opening → joint angle
+ └──────────────┬───────────────┘
+                ▼
+   SO-101 pose IK (Isaac Lab damped least squares, 5 arm joints) → joint targets → simulated robot
+```
+
+Process layout (two Python environments that talk over a local socket):
+
+| Process | Environment | Runs |
+|---|---|---|
+| Simulator + evaluation loop | `~/isaacsim` (Isaac Sim 6.1, Isaac Lab 3.0) | `scripts/eval_policy.py`, environment, adapter, IK |
+| Policy server | `~/lerobot-env` (LeRobot 0.6.1, PyTorch 2.11 cu130, TensorRT 10.16) | `so101_lang/serve/policy_server.py`: VLA, OWLv2, SAM2, stereo depth |
+| Planner LLM (not wired in yet) | Ollama in `~/.local/ollama` | `qwen3-vl:8b` |
+
+### Frames and conventions
+- **Head frame:** origin midway between the two optical centres, +X forward (viewing direction), +Y left,
+  +Z up. All VLA state, actions and target points are in this frame. Quaternions are xyzw.
+- **TCP:** grasp point between the jaw pads = gripper link + (0.009, 0, -0.090) m in the gripper-link frame.
+- **10-D state/action:** `[tcp.x, tcp.y, tcp.z, r11, r21, r31, r12, r22, r32, gripper.open]`
+  (rotation as the first two matrix columns; gripper 0 = closed, 1 = open). The 13-D state adds `target.x/y/z`.
+- **Relative actions:** the first 9 action dims are trained as `action_norm − state_norm` and the state is added
+  back at inference (`relative_action_dims=9`); exactly invertible.
+
+### Skills (`so101_lang/language.py`)
+| Skill | Parameter (allowed values) | Canonical step text |
+|---|---|---|
+| `pick` | `object`: red / green / blue / yellow cube | "pick up the {object}" |
+| `place` | `target`: white / pink plate | "place it on the {target}" |
+
+Training phrasings and held-out phrasings per skill are defined there; `HELDOUT_PAIRS` = (yellow, pink), (green, white).
+
+---
+
+## 2. Simulation (`so101_lang/envs/`)
+- Task `SO101-PickPlace-Lang-IK-v0` (IK-controlled) and `SO101-PickPlace-Lang-Joint-v0` (joint-controlled, unused now).
+- Scene: Isaac Lab's SO-101 (`so101_new_calib`) seated on a table, 4 coloured 3 cm cubes, 2 plates; random
+  non-overlapping layout and (cube, plate) task per episode.
+- **Stereo head:** two parallel 512×512 pinhole cameras, 6 cm baseline, 32 mm focal length (~36° FOV),
+  centre at (−0.12, 0.20, 0.45) m looking at (0.21, −0.01, 0) — over the arm's "left shoulder".
+  Calibration (intrinsics, head-in-base) is saved with every dataset as `meta/stereo_calibration.json`.
+- Success: target cube resting on the target plate, gripper open, cube nearly still.
+
+## 3. Data (`scripts/gen_demos.py`, `so101_lang/expert/`, `so101_lang/data/`)
+- **Scripted expert** (`expert/pick_place_sm.py`): top-down grasp state machine on the IK action
+  (approach → descend → close → lift → carry → lower → release), about 97–98 % success.
+- **DART noise:** a smooth Ornstein–Uhlenbeck offset (σ ~ U(0, 12 mm) per episode) on the *executed* command;
+  recorded labels stay clean, so the data contains recoveries.
+- Frames are labelled per skill (`pick` until lifted, then `place`) with that skill's step text.
+- Raw recordings: `datasets/raw/s512_dart_1000.h5` (1000 episodes, 98 GB).
+- LeRobot datasets: `datasets/lerobot/s512_dart_none` (10-D state) and `datasets/lerobot/s512_dart_target`
+  (13-D state with target point, built by `data/add_target_point.py`, videos linked rather than copied).
+
+## 4. VLA training (`so101_lang/policies/smolvla_depth/`, `train/`)
+- LeRobot plugin `smolvla_depth` = SmolVLA + optional native depth branch (point-map tokens, zero-gated)
+  + optional relative actions. Train through `python -m so101_lang.train_cli` (registers the plugin).
+- **Current checkpoint:** `checkpoints/s512_target_ft/checkpoints/last/pretrained_model`
+  - Fine-tuned 2,500 steps on `s512_dart_target` from `checkpoints/s512_rel_none_16000` (16k steps, no target).
+  - Depth branch off, relative actions on (9 dims), cameras left→camera1, right→camera2, camera3 empty.
+- SmolVLA's vision-language backbone is frozen (`train_expert_only=True`); about 100 M parameters train.
+
+## 5. Perception (`so101_lang/perception/`)
+| Module | What it does |
+|---|---|
+| `stereo_depth.py` | Depth from the stereo pair. Default `fast_foundationstereo` (NVIDIA Fast-FoundationStereo ONNX, TensorRT FP16, 320 px: 2.2 mm median error vs ground truth, ~9 ms). Also SGBM (classical, noisy on textureless table). Colormap encoding and point-map (`depth_to_pointmap`) helpers. |
+| `locate.py` | `TargetLocator`: OWLv2 detection ("a small red cube", "a round flat white plate") + depth in the box centre → head-frame 3-D point; `point_from_mask` with robot self-filter. |
+| `sam2_tracker.py` | SAM2.1-small streaming video tracking, seeded with OWLv2 boxes. Robot self-filter (drops pixels within 3.5 cm of the arm's keypoints), mask-growth and jump checks, occlusion hold, and a 2.5 cm displacement deadband: published target = initial detection + tracked displacement. |
+
+Targets are perceived **once at episode start** (before the arm occludes the scene), optionally followed by SAM2.
+Pick targets freeze when the gripper is within 5 cm; place targets within 6 cm.
+
+## 6. Evaluation (`scripts/eval_policy.py` + `serve/policy_server.py`)
+- Seeded: layouts, pushes and the VLA's sampling noise (per episode and skill) are reproducible, so variants are
+  paired. Without seeding, two identical 20-episode runs differed in 10/20 outcomes — use ≥ 50 episodes.
+- `--target {none, oracle, perception, sam2, oracle_tracked}`, `--push` (slide the target cube 3–6 cm over 0.5 s
+  during pick), `--heldout_pairs`, `--sam2_every`.
+- Logs per episode: pick/place success, gripper-to-target distance and nearest cube at the first close, target
+  error at close, push distance, SAM2 statuses.
+
+```bash
+# policy server (lerobot-env), then evaluation (isaacsim env)
+~/lerobot-env/bin/python -m so101_lang.serve.policy_server --checkpoint checkpoints/s512_target_ft/checkpoints/last/pretrained_model --depth none
+OMNI_KIT_ACCEPT_EULA=YES ~/isaacsim/bin/python scripts/eval_policy.py --episodes 50 --seed 0 --target perception
+```
+
+---
+
+## 7. Results so far (fair runs: seeded, 50 paired episodes)
+
+| Setup | Pick | Full pick + place |
+|---|---|---|
+| Language only, no target point (any resolution / training length tried) | ~3 % | ~0 % |
+| Target point, **static perception**, stationary objects | 38 % | 26 % |
+| Target point, **SAM2 tracking**, stationary objects | 38 % | 24 % |
+| Teleport push (unrealistic), any target source incl. oracle | 0 % on pushed episodes | — |
+| Sliding push | in progress | — |
+
+Key findings:
+1. Without a target point, the VLA ignores the instruction's colour word (swapping the colour moves predictions
+   ~3 mm vs ~26 mm for images) and closes 4–25 cm from the target. A perception-provided 3-D target fixed grounding.
+2. Perception is accurate (cube ~2 mm, plate ~7–9 mm median), but about 1 in 10 episodes starts from a wrong
+   OWLv2 detection (~200+ mm off); tracking cannot fix that.
+3. SAM2 tracking costs nothing on stationary scenes once the self-filter, checks and deadband are in.
+4. The VLA was trained only with targets that stay constant within a skill; even perfect (oracle) target updates
+   did not help on teleport pushes.
+5. Stereo-depth image as a third camera: comparison was inconclusive (all variants under-trained); native depth
+   branch (`smolvla_depth` with point map) is built but not yet evaluated.
+
+## 8. Not done yet / next steps
+- Wire in the LLM planner (Ollama qwen3-vl:8b, `skills_schema()` as the function list, validation, re-planning).
+- Full training run with the target point (current model is a 2,500-step fine-tune).
+- Better first detection (confidence / LLM verification).
+- Train the VLA to follow moving targets (demos with pushes, per-frame targets, target-noise augmentation).
+- Rerun the depth comparison on the working recipe (no depth / colormap depth / native depth tokens).
+- Real robot: hand-eye calibration of the head (`head_in_base`), standalone IK, real stereo camera.
+
+## 9. File map
+```
+so101_lang/
+  language.py                  object vocabulary, skill registry, skills_schema(), templates
+  sim_app.py                   Isaac Lab launch helpers (isaacsim env)
+  envs/                        task config, MDP terms, stereo head calibration (head.py)
+  expert/pick_place_sm.py      scripted demonstrator (+ DART noise)
+  robots/frames.py, so101.py   rigid-transform maths; SO101Adapter
+  data/                        HDF5 → LeRobot converter; add_target_point
+  perception/                  stereo_depth, locate (OWLv2), sam2_tracker
+  policies/smolvla_depth/      LeRobot plugin (depth branch, relative actions)
+  serve/policy_server.py       VLA + perception server
+  train_cli.py                 lerobot-train with the plugin registered
+scripts/                       data generation, replay, evaluation, benchmarks, experiment drivers
+train/                         training launchers
+tests/                         frame-maths tests
+models/ (git-ignored)          Fast-FoundationStereo ONNX + TensorRT cache, smolvla_depth base config
+datasets/, checkpoints/, outputs/ (git-ignored)
+```
+
+Licences of downloaded models: SmolVLA base, OWLv2, SAM2.1 — Apache-2.0; Fast-FoundationStereo — NVIDIA Open
+Model Agreement (model card: research and evaluation use); Qwen3-VL — Apache-2.0.
