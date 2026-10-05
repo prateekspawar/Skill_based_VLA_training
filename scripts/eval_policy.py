@@ -20,7 +20,7 @@ parser.add_argument("--exec_steps", type=int, default=10, help="Actions executed
 parser.add_argument("--step_timeout", type=float, default=12.0, help="Seconds allowed per skill.")
 parser.add_argument("--port", type=int, default=6000)
 parser.add_argument("--heldout_pairs", action="store_true", help="Sample only the held-out (cube, plate) pairs.")
-parser.add_argument("--target", choices=["none", "oracle", "perception", "sam2", "oracle_tracked"], default="none",
+parser.add_argument("--target", choices=["none", "oracle", "perception", "sam2", "oracle_tracked"], default="sam2",
                     help="Skill target point (head frame): oracle = simulator truth at skill start; perception = OWLv2 + "
                          "stereo once at episode start; sam2 = OWLv2 seeds SAM2 at episode start, masks are propagated "
                          "every query and turned into points with stereo depth; oracle_tracked = simulator truth "
