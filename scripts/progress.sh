@@ -48,3 +48,27 @@ else
   printf "  2c evaluate              %s  (stationary %s/50, push %s/50)\n" "$(pct $((es + ep)) 100)" "$es" "$ep"
   grep -E "\[skills\] (still|push):" outputs/stage_per_skill_driver.log 2>/dev/null | sed 's/^/  result: /'
 fi
+
+echo "=== Depth comparison (D1 depth image as camera3, D2 native point-map tokens) ==="
+if [ ! -d outputs/stage_depth ]; then
+  echo "  not started"
+else
+  D=outputs/stage_depth
+  for part in static moving; do
+    cv=$(last_num $D/convert_$part.log '\[convert\] [0-9]+'); cv=${cv:-0}
+    grep -q "\[convert\] wrote" $D/convert_$part.log 2>/dev/null && cv=1000
+    printf "  convert %-7s           %s  (%s/1000 episodes)\n" "$part" "$(pct $cv 1000)" "$cv"
+  done
+  mt=0; [ -f datasets/lerobot/s512_mix_depth_target/meta/info.json ] && mt=1
+  printf "  merge + targets          %s\n" "$(pct $mt 1)"
+  for v in d1_depthcam_20000 d2_pointmap_20000; do
+    ts=$(train_step $D/train_$v.log); ts=${ts:-0}
+    printf "  train %-18s %s  (step %s/20000)\n" "$v" "$(pct $ts 20000)" "$ts"
+  done
+  for v in d1_depthcam_20000 d2_pointmap_20000; do
+    es=$(eval_done $D/$v/eval_still.log); ep=$(eval_done $D/$v/eval_push.log)
+    printf "  eval  %-18s %s  (stationary %s/50, push %s/50)\n" "$v" "$(pct $((es + ep)) 100)" "$es" "$ep"
+  done
+  grep -E "\[depth\] d[12]_.*(still|push):" outputs/stage_depth_driver.log 2>/dev/null | grep -E "pick success" | sed 's/^/  result: /'
+  echo "  baseline (no depth): stationary 64% pick / 44% full, push 50% / 34%"
+fi
