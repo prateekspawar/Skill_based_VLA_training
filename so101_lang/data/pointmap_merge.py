@@ -23,6 +23,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 KEY = "observation.pointmap"
+EPISODES_PER_FILE = 12
 
 
 def _files(root: Path):
@@ -89,6 +90,10 @@ def attach(merged: Path, dst: Path, sources: list[Path]):
     offsets = np.cumsum([0] + [n for _, _, n in srcs])
     col_type = pq.read_schema(_files(sources[0])[0]).field(KEY).type
     missing = 0
+    info = json.loads((dst / "meta" / "info.json").read_text())
+    chunks_size = int(info.get("chunks_size", 1000))
+    ep_location = {}  # episode -> (chunk_index, file_index) in the rewritten data
+    file_no = 0
     for f in _files(merged):
         t = pq.read_table(f)
         eps, frames = t.column("episode_index").to_numpy(), t.column("frame_index").to_numpy()
@@ -101,14 +106,31 @@ def attach(merged: Path, dst: Path, sources: list[Path]):
                 missing += 1
                 continue
             out[i] = maps[row]
-        # Chunked column: one list array per 50k rows keeps the int32 list offsets in range for big files.
-        chunks = [_nested_list(out[i : i + 50_000], col_type) for i in range(0, len(out), 50_000)]
-        t = t.append_column(KEY, pa.chunked_array(chunks, type=col_type))
-        o = dst / f.relative_to(merged)
-        o.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(t, o, row_group_size=50_000)
+        # Write small files of EPISODES_PER_FILE episodes each: one huge file overflows the int32 list offsets
+        # when Hugging Face datasets loads the point-map column.
+        unique_eps = np.unique(eps)
+        for g in range(0, len(unique_eps), EPISODES_PER_FILE):
+            group = unique_eps[g : g + EPISODES_PER_FILE]
+            rows = np.nonzero(np.isin(eps, group))[0]
+            part = t.take(pa.array(rows)).append_column(KEY, _nested_list(out[rows], col_type))
+            chunk, fidx = divmod(file_no, chunks_size)
+            o = dst / info["data_path"].format(chunk_index=chunk, file_index=fidx)
+            o.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(part, o)
+            for e in group:
+                ep_location[int(e)] = (chunk, fidx)
+            file_no += 1
+    # Point each episode's metadata at its new data file.
+    for mf in sorted((dst / "meta" / "episodes").rglob("*.parquet")):
+        mt = pq.read_table(mf)
+        eps = mt.column("episode_index").to_numpy()
+        for col, pos in (("data/chunk_index", 0), ("data/file_index", 1)):
+            vals = pa.array([ep_location[int(e)][pos] for e in eps], type=mt.schema.field(col).type)
+            mt = mt.set_column(mt.schema.get_field_index(col), col, vals)
+        pq.write_table(mt, mf)
+    if "total_files" in info:
+        info["total_files"] = file_no
     src_info = json.loads((sources[0] / "meta" / "info.json").read_text())
-    info = json.loads((dst / "meta" / "info.json").read_text())
     info["features"][KEY] = src_info["features"][KEY]
     (dst / "meta" / "info.json").write_text(json.dumps(info, indent=4))
     src_stats = json.loads((sources[0] / "meta" / "stats.json").read_text())
