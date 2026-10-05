@@ -98,7 +98,11 @@ Training phrasings and held-out phrasings per skill are defined there; `HELDOUT_
 ## 4. VLA training (`so101_lang/policies/smolvla_depth/`, `train/`)
 - LeRobot plugin `smolvla_depth` = SmolVLA + optional native depth branch (point-map tokens, zero-gated)
   + optional relative actions. Train through `python -m so101_lang.train_cli` (registers the plugin).
-- **Current checkpoint:** `checkpoints/s512_target_ft/checkpoints/last/pretrained_model`
+- **Current checkpoint (stage 1):** `checkpoints/mix_target_20000/checkpoints/last/pretrained_model`
+  - 20k steps from the SmolVLA base on `s512_mix_target`: 1000 static + 1000 moving-target episodes (cube slides
+    during pick in ~35 %, plate slides during carry in ~37 %), 13-D state with SAM2-style targets
+    (`data/build_targets.py`: detection noise, 2.5 cm deadband, SAM2 update rate, near-gripper freeze).
+- Previous checkpoint: `checkpoints/s512_target_ft/checkpoints/last/pretrained_model`
   - Fine-tuned 2,500 steps on `s512_dart_target` from `checkpoints/s512_rel_none_16000` (16k steps, no target).
   - Depth branch off, relative actions on (9 dims), cameras left→camera1, right→camera2, camera3 empty.
 - SmolVLA's vision-language backbone is frozen (`train_expert_only=True`); about 100 M parameters train.
@@ -140,6 +144,8 @@ OMNI_KIT_ACCEPT_EULA=YES ~/isaacsim/bin/python scripts/eval_policy.py --episodes
 | Sliding push (3–6 cm over 0.5 s), **static perception** | 12 % | 6 % |
 | Sliding push, **SAM2 tracking** | **28 %** | **18 %** |
 | Sliding push, **oracle tracking** (true position refreshed every query) | 12 % | 10 % |
+| **Stage 1 model** (static + moving demos, SAM2-style targets, 20k steps), SAM2, stationary | **64 %** | **44 %** |
+| **Stage 1 model**, SAM2, sliding push | **50 %** | **34 %** (pushed episodes: 18/43 pick, 12/43 full) |
 
 Key findings:
 1. Without a target point, the VLA ignores the instruction's colour word (swapping the colour moves predictions
@@ -158,7 +164,7 @@ Key findings:
 - Wire in the LLM planner (Ollama qwen3-vl:8b, `skills_schema()` as the function list, validation, re-planning).
 - Full training run with the target point (current model is a 2,500-step fine-tune).
 - Better first detection (confidence / LLM verification).
-- Train the VLA to follow moving targets (demos with pushes, per-frame targets, target-noise augmentation).
+- ~~Train the VLA to follow moving targets~~ done in stage 1; stage 2 (separate pick / place models) running.
 - Rerun the depth comparison on the working recipe (no depth / colormap depth / native depth tokens).
 - Real robot: hand-eye calibration of the head (`head_in_base`), standalone IK, real stereo camera.
 
