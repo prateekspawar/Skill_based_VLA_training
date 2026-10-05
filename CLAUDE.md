@@ -7,3 +7,6 @@
 - Evaluations must be seeded (`--seed`) and use ≥ 50 episodes; unseeded 20-episode runs are dominated by noise.
 - `pkill -f <pattern>` can kill the calling shell when the pattern appears in its own command line; kill by PID.
 - Large assets (`datasets/`, `checkpoints/`, `models/`, `outputs/`) are git-ignored.
+- Launch long jobs detached (`setsid nohup <cmd> > log 2>&1 < /dev/null &`): background jobs started through the
+  session are killed when the Claude session ends (this interrupted a 20k-step training once). Cron reminders are
+  session-only too and must be recreated in a new session.

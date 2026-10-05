@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 pct() { awk -v a="$1" -v b="$2" 'BEGIN { if (b > 0) printf "%3.0f%%", 100 * a / b; else printf "  0%%" }'; }
 last_num() { [ -f "$1" ] && tr '\r' '\n' < "$1" | grep -oE "$2" | tail -1 | grep -oE '[0-9]+' | head -1; }
 train_step() {  # current training step from a lerobot-train log ("12/20000" progress bar)
-  [ -f "$1" ] && tr '\r' '\n' < "$1" | grep -oE '[0-9]+/[0-9]+ \[' | tail -1 | cut -d/ -f1
+  [ -f "$1" ] && tr '\r' '\n' < "$1" | grep -aoE '[0-9]+/[0-9]+ \[' | tail -1 | cut -d/ -f1
 }
 eval_done() { [ -f "$1" ] && grep -cE "\[eval\] +[0-9]+ " "$1" || echo 0; }
 
@@ -18,6 +18,9 @@ printf "  1b convert               %s  (%s/1000 episodes)\n" "$(pct $c 1000)" "$
 m=0; [ -f datasets/lerobot/s512_mix_target/meta/info.json ] && m=1
 printf "  1c merge + targets       %s\n" "$(pct $m 1)"
 t=$(train_step outputs/stage_moving/train.log); t=${t:-0}
+if [ -f outputs/stage_moving/train_resume.log ]; then  # resumed from the step-10000 checkpoint
+  r=$(train_step outputs/stage_moving/train_resume.log); t=$((10000 + ${r:-0}))
+fi
 printf "  1d train (20k steps)     %s  (step %s/20000)\n" "$(pct $t 20000)" "$t"
 es=$(eval_done outputs/stage_moving/eval_still.log); ep=$(eval_done outputs/stage_moving/eval_push.log)
 printf "  1e evaluate              %s  (stationary %s/50, push %s/50)\n" "$(pct $((es + ep)) 100)" "$es" "$ep"
