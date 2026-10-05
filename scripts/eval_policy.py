@@ -26,8 +26,9 @@ parser.add_argument("--target", choices=["none", "oracle", "perception", "sam2",
                          "every query and turned into points with stereo depth; oracle_tracked = simulator truth "
                          "refreshed every query (upper bound).")
 parser.add_argument("--push", action="store_true",
-                    help="Moving-target test: during pick, teleport the target cube 3-6 cm while the gripper is still away.")
+                    help="Moving-target test: during pick, slide the target cube 3-6 cm over 0.5 s while the gripper is >6 cm away.")
 parser.add_argument("--seed", type=int, default=0, help="Seeds layouts and pushes so runs are comparable.")
+parser.add_argument("--sam2_every", type=int, default=3, help="Control steps between SAM2 updates during pick.")
 parser.add_argument("--video_out", default="outputs/eval/episode0.mp4", help="Left-camera video of episode 0.")
 args, env_cfg = sim_app.parse(parser, TASK)
 env_cfg.scene.num_envs = 1
@@ -148,11 +149,12 @@ with sim_app.launch(env_cfg, args):
             track_status[st] = track_status.get(st, 0) + 1
         return out
 
-    def push_cube(cube, rng):
-        """Teleport the target cube 3-6 cm in a random direction to a free spot in the workspace."""
-        obj = env.scene[f"cube_{cube}"]
+    PUSH_TIME = 0.5  # [s] the cube slides over this long
+
+    def plan_push(cube, rng):
+        """Pick a free spot 3-6 cm away in the workspace; returns the planar slide velocity [m/s] or None."""
         origin = env.scene.env_origins[0]
-        pos = (obj.data.root_pos_w.torch[0] - origin).cpu().numpy()
+        pos = (env.scene[f"cube_{cube}"].data.root_pos_w.torch[0] - origin).cpu().numpy()
         others = [(env.scene[n].data.root_pos_w.torch[0] - origin).cpu().numpy() for n in CUBE_NAMES + PLATE_NAMES
                   if n != f"cube_{cube}"]
         clear = [0.045] * (len(CUBE_NAMES) - 1) + [PLATE_RADIUS + 0.025] * len(PLATE_NAMES)
@@ -161,14 +163,22 @@ with sim_app.launch(env_cfg, args):
             new = pos[:2] + dist * np.array([np.cos(ang), np.sin(ang)])
             if not (WORKSPACE_X[0] <= new[0] <= WORKSPACE_X[1] and WORKSPACE_Y[0] <= new[1] <= WORKSPACE_Y[1]):
                 continue
-            if all(np.linalg.norm(new - o[:2]) > c for o, c in zip(others, clear)):
-                p = torch.tensor([[new[0], new[1], CUBE_Z]], dtype=torch.float32, device=env.device) + origin
-                q = obj.data.root_quat_w.torch[0:1]
-                ids = torch.tensor([0], device=env.device)
-                obj.write_root_pose_to_sim_index(root_pose=torch.cat([p, q], -1).float(), env_ids=ids)
-                obj.write_root_velocity_to_sim_index(root_velocity=torch.zeros(1, 6, device=env.device), env_ids=ids)
-                return 1000 * dist
+            # The whole slide path must stay clear of the other objects.
+            path = [pos[:2] + (new - pos[:2]) * k / 5 for k in range(6)]
+            if all(np.linalg.norm(pt - o[:2]) > c for pt in path for o, c in zip(others, clear)):
+                return (new - pos[:2]) / PUSH_TIME
         return None
+
+    def drive_push(cube, start, vel_xy, k, n):
+        """Step ``k`` of ``n`` of a push: move the cube a small step along its slide path (continuous motion as
+        the cameras see it; written directly because table friction stops a velocity-driven cube within a step)."""
+        obj = env.scene[f"cube_{cube}"]
+        p = start.clone().unsqueeze(0)
+        p[0, :2] += torch.as_tensor(vel_xy, dtype=torch.float32, device=env.device) * PUSH_TIME * k / n
+        q = obj.data.root_quat_w.torch[0:1]
+        ids = torch.tensor([0], device=env.device)
+        obj.write_root_pose_to_sim_index(root_pose=torch.cat([p, q], -1).float(), env_ids=ids)
+        obj.write_root_velocity_to_sim_index(root_velocity=torch.zeros(1, 6, device=env.device), env_ids=ids)
 
     results, frames_out, latencies, perception_err = [], [], [], []
     track_err, track_status = [], {}
@@ -194,8 +204,9 @@ with sim_app.launch(env_cfg, args):
         if args.target == "sam2":
             perceived = sam2_targets("sam2_start", cube, plate, head_b)
         rng = np.random.default_rng(args.seed * 1000 + ep)
-        push_at = rng.uniform(0.6, 1.6)  # [s] into the pick skill
+        push_at = rng.uniform(0.3, 1.0)  # [s] into the pick skill
         outcome["push_mm"] = None
+        push = {"vel": None, "steps_left": 0, "start": None}
         done = False
         for skill_i, (skill, text) in enumerate(steps):
             conn.send({"cmd": "reset", "seed": args.seed * 100000 + ep * 10 + skill_i})
@@ -237,11 +248,30 @@ with sim_app.launch(env_cfg, args):
                     _, _, term, trunc, _ = env.step(adapter.ik_command(a.unsqueeze(0), head_b))
                     t += 1
                     ep_steps += 1
-                    if args.push and skill == "pick" and outcome["push_mm"] is None and t * env.step_dt >= push_at:
+                    if (args.push and skill == "pick" and push["start"] is None and outcome["close"] is None
+                            and t * env.step_dt >= push_at):
                         tcp, cubes = tcp_and_cubes_b()
-                        if float(torch.linalg.norm(cubes[cube, :2] - tcp[:2])) > 0.06:
-                            outcome["push_mm"] = push_cube(cube, rng)
+                        if float(torch.linalg.norm(cubes[cube] - tcp)) > 0.06:  # gripper still well away (3-D)
+                            push["vel"] = plan_push(cube, rng)
+                            push["start"] = env.scene[cube_name].data.root_pos_w.torch[0].clone()
+                            push["steps_left"] = round(PUSH_TIME / env.step_dt) if push["vel"] is not None else 0
+                    if push["steps_left"] > 0:
+                        push["steps_left"] -= 1
+                        n = round(PUSH_TIME / env.step_dt)
+                        drive_push(cube, push["start"], push["vel"], n - push["steps_left"], n)
+                        if push["steps_left"] == 0:  # slide finished: measure the actual displacement
+                            moved = env.scene[cube_name].data.root_pos_w.torch[0] - push["start"]
+                            outcome["push_mm"] = 1000 * float(torch.linalg.norm(moved[:2]))
                             rest_z = float(env.scene[cube_name].data.root_pos_w.torch[0, 2])
+                            if args.target == "sam2":
+                                outcome["sam2_err_after_push"] = 1000 * float(np.linalg.norm(
+                                    perceived["pick"] - oracle_target("pick", cube, plate, head_b)))
+                    if (args.target == "sam2" and skill == "pick" and outcome["close"] is None
+                            and t % args.sam2_every == 0):
+                        # Feed SAM2 the motion between policy queries so masks follow moving objects.
+                        tcp_h = state_now(head_b)[0, :3].cpu().numpy()
+                        frozen = ("pick",) if np.linalg.norm(tcp_h - perceived["pick"]) < 0.05 else ()
+                        perceived = sam2_targets("sam2_update", cube, plate, head_b, frozen + ("place",))
                     if ep == 0:
                         frames_out.append(rgb("left_cam"))
                     lifted = float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) > rest_z + 0.03
@@ -279,6 +309,11 @@ with sim_app.launch(env_cfg, args):
     if args.push:
         print(f"[eval] pushes: {len(pushed)}/{n} episodes; pick success on pushed episodes "
               f"{sum(r['pick'] for r in pushed)}/{len(pushed)}, full {sum(r['place'] for r in pushed)}/{len(pushed)}")
+    after = [r["sam2_err_after_push"] for r in results if r.get("sam2_err_after_push") is not None]
+    if after:
+        moved = [r["push_mm"] for r in results if r.get("sam2_err_after_push") is not None]
+        print(f"[eval] SAM2 target error right after a push: median {np.median(after):.0f} mm, max {np.max(after):.0f} mm "
+              f"(cube actually moved median {np.median(moved):.0f} mm) [{len(after)}]")
     errs_close = [r["target_err_at_close"] for r in results if r.get("target_err_at_close") is not None]
     if errs_close:
         print(f"[eval] target-point error when the gripper closes: median {np.median(errs_close):.0f} mm, "
