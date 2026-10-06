@@ -72,3 +72,22 @@ else
   grep -E "\[depth\] d[12]_.*(still|push):" outputs/stage_depth_driver.log 2>/dev/null | grep -E "pick success" | sed 's/^/  result: /'
   echo "  baseline (no depth): stationary 64% pick / 44% full, push 50% / 34%"
 fi
+
+echo "=== Separate skill models (pick / place / find, shared backbone, 9-D targets) ==="
+if [ ! -d outputs/stage_skills ]; then
+  echo "  not started"
+else
+  for name in pick9_15000 place9_15000 find9_8000; do
+    lg=outputs/stage_skills/train_$name.log
+    ts=$(train_step $lg); ts=${ts:-0}
+    tot=${name##*_}
+    [ -f "$lg" ] && printf "  train %-14s %s  (step %s/%s)\n" "$name" "$(pct $ts $tot)" "$ts" "$tot" || printf "  train %-14s   0%%  (not started)\n" "$name"
+  done
+  fg=$(last_num outputs/gen_find_1000.log 'saved [0-9]+/1000'); fg=${fg:-0}
+  grep -q "\[find\] done" outputs/gen_find_1000.log 2>/dev/null && fg=1000
+  printf "  find demos               %s  (%s/1000 episodes)\n" "$(pct $fg 1000)" "$fg"
+  for v in direct_still direct_push find_still find_push; do
+    es=$(eval_done outputs/stage_skills/eval_$v.log)
+    printf "  eval %-19s %s  (%s/50)\n" "$v" "$(pct $es 50)" "$es"
+  done
+fi
