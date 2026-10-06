@@ -43,9 +43,16 @@ parser.add_argument("--video_episode", type=int, default=0, help="Which episode 
 args, env_cfg = sim_app.parse(parser, TASK)
 env_cfg.scene.num_envs = 1
 env_cfg.episode_length_s = 2 * args.step_timeout + 2
-SUCCESS_TERM = env_cfg.terminations.success
+SUCCESS_FUNC = env_cfg.terminations.success.func
 if args.verdict:
-    env_cfg.terminations.success = None  # place must run until the model reports; success is checked directly
+    # Place must run until the model reports, so the success term never terminates; it stays registered so the
+    # manager resolves its parameters (joint ids), and on_plate() calls the real check with them.
+    import functools
+
+    def _never(env, *a, **kw):
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    env_cfg.terminations.success.func = functools.update_wrapper(_never, SUCCESS_FUNC)  # same signature
 
 with sim_app.launch(env_cfg, args):
     from multiprocessing.connection import Client
@@ -80,7 +87,7 @@ with sim_app.launch(env_cfg, args):
     verdicts = {"pick": [], "place": [], "find": []}  # (verdict: True / False / "timeout", truth: bool)
 
     def on_plate():
-        return bool(SUCCESS_TERM.func(env, **SUCCESS_TERM.params)[0])
+        return bool(SUCCESS_FUNC(env, **env.termination_manager.get_term_cfg("success").params)[0])
 
     class Verdict:
         """Debounced [done, success] reading from the executed actions."""
@@ -394,7 +401,15 @@ with sim_app.launch(env_cfg, args):
                 if skill == "pick" and outcome["pick"] and not args.verdict:
                     break
             if args.verdict:
+                if not done:  # hold the last command 0.5 s (as the robot does after a verdict), then check the truth
+                    for _ in range(10):
+                        env.step(adapter.ik_command(a.unsqueeze(0), head_b))
                 lifted = float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) > rest_z + 0.03
+                if skill == "place":
+                    c = env.scene[cube_name].data.root_pos_w.torch[0]
+                    pl = env.scene[f"plate_{plate}"].data.root_pos_w.torch[0]
+                    outcome["place_geom"] = (1000 * float(torch.linalg.norm(c[:2] - pl[:2])), 1000 * float(c[2] - pl[2]),
+                                             float(adapter.opening_from_joint(robot.data.joint_pos.torch[:, 5])[0]))
                 truth = lifted if skill == "pick" else on_plate()
                 if skill == "place":
                     outcome["place"] = truth
@@ -415,6 +430,8 @@ with sim_app.launch(env_cfg, args):
         if args.verdict:
             close_txt += " | verdicts " + " ".join(f"{sk}={outcome[f'{sk}_verdict'][0]}/{outcome[f'{sk}_verdict'][1]}"
                                                      for sk in ("pick", "place") if f"{sk}_verdict" in outcome)
+        if outcome.get("place_geom"):
+            close_txt += " | cube-plate dxy={:.0f}mm dz={:.0f}mm opening={:.2f}".format(*outcome["place_geom"])
         print(f"[eval] {ep:3d} '{outcome['goal']}': pick={'ok' if outcome['pick'] else 'FAIL'} "
               f"place={'ok' if outcome['place'] else 'FAIL'} | {close_txt}", flush=True)
         if ep == args.video_episode and frames_out:
