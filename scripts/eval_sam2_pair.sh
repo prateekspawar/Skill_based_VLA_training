@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # SAM2 evaluation of a model (or pick + place models): 50 seeded stationary + 50 sliding-push episodes.
-# Usage: [DEPTH=fast_foundationstereo] scripts/eval_sam2_pair.sh <out_dir> <checkpoint> [place_checkpoint]
+# Usage: [DEPTH=none|fast_foundationstereo] scripts/eval_sam2_pair.sh <out_dir> <checkpoint> [place_checkpoint]
 set -uo pipefail
 cd "$(dirname "$0")/.."
 OUT=${1:?out dir}; CKPT=${2:?checkpoint}; PLACE=${3:-}
 mkdir -p "$OUT"
 extra_server=""; [[ -n "$PLACE" ]] && extra_server="--checkpoint_place $PLACE"
-~/lerobot-env/bin/python -m so101_lang.serve.policy_server --checkpoint "$CKPT" $extra_server --depth "${DEPTH:-none}" > "$OUT/server.log" 2>&1 &
+~/lerobot-env/bin/python -m so101_lang.serve.policy_server --checkpoint "$CKPT" $extra_server --depth "${DEPTH:-fast_foundationstereo}" > "$OUT/server.log" 2>&1 &
 server=$!
 until grep -q listening "$OUT/server.log"; do sleep 3; done
 for v in still push; do

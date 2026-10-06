@@ -98,7 +98,11 @@ Training phrasings and held-out phrasings per skill are defined there; `HELDOUT_
 ## 4. VLA training (`so101_lang/policies/smolvla_depth/`, `train/`)
 - LeRobot plugin `smolvla_depth` = SmolVLA + optional native depth branch (point-map tokens, zero-gated)
   + optional relative actions. Train through `python -m so101_lang.train_cli` (registers the plugin).
-- **Current checkpoint (stage 1):** `checkpoints/mix_target_20000/checkpoints/last/pretrained_model`
+- **Current checkpoint (chosen for future use):** `checkpoints/d2_pointmap_20000/checkpoints/last/pretrained_model`
+  - Same data and recipe as stage 1 plus the native depth branch (head-frame point map from Fast-FoundationStereo
+    → 64 zero-gated tokens). Performs on par with the no-depth model (see the depth comparison) at ~10 ms more
+    latency; kept so depth is available to the policy. Serve with `--depth fast_foundationstereo`.
+- **Stage-1 checkpoint (no depth input):** `checkpoints/mix_target_20000/checkpoints/last/pretrained_model`
   - 20k steps from the SmolVLA base on `s512_mix_target`: 1000 static + 1000 moving-target episodes (cube slides
     during pick in ~35 %, plate slides during carry in ~37 %), 13-D state with SAM2-style targets
     (`data/build_targets.py`: detection noise, 2.5 cm deadband, SAM2 update rate, near-gripper freeze).
@@ -127,8 +131,8 @@ Pick targets freeze when the gripper is within 5 cm; place targets within 6 cm.
 
 ```bash
 # policy server (lerobot-env), then evaluation (isaacsim env)
-~/lerobot-env/bin/python -m so101_lang.serve.policy_server --checkpoint checkpoints/s512_target_ft/checkpoints/last/pretrained_model --depth none
-OMNI_KIT_ACCEPT_EULA=YES ~/isaacsim/bin/python scripts/eval_policy.py --episodes 50 --seed 0 --target perception
+~/lerobot-env/bin/python -m so101_lang.serve.policy_server --checkpoint checkpoints/d2_pointmap_20000/checkpoints/last/pretrained_model --depth fast_foundationstereo
+OMNI_KIT_ACCEPT_EULA=YES ~/isaacsim/bin/python scripts/eval_policy.py --episodes 50 --seed 0 --target sam2
 ```
 
 ---
