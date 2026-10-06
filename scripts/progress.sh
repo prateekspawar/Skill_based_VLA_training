@@ -73,21 +73,24 @@ else
   echo "  baseline (no depth): stationary 64% pick / 44% full, push 50% / 34%"
 fi
 
-echo "=== Separate skill models (pick / place / find, shared backbone, 9-D targets) ==="
-if [ ! -d outputs/stage_skills ]; then
+echo "=== Skill models with pass/fail verdict (pick / place / find, 12-D action) ==="
+if [ ! -f logs/stage_verdict.log ]; then
   echo "  not started"
 else
-  for name in pick9_15000 place9_15000 find9_8000; do
-    lg=outputs/stage_skills/train_$name.log
+  V=outputs/stage_verdict
+  fg=$(last_num logs/gen_fail_400.log 'saved [0-9]+/400'); fg=${fg:-0}
+  grep -q "\[fail\] done" logs/gen_fail_400.log 2>/dev/null && fg=400
+  printf "  failure demos (pick/place) %s  (%s/400 episodes)\n" "$(pct $fg 400)" "$fg"
+  f1=$(grep -oE "saved [0-9]+/1000" logs/gen_find_all.log 2>/dev/null | tail -1 | grep -oE "[0-9]+" | head -1); f1=${f1:-0}
+  grep -q "find_1000.h5" logs/gen_find_all.log 2>/dev/null && grep -q "done.*find_1000" logs/gen_find_all.log && f1=1000
+  f2=$(grep -oE "saved [0-9]+/200" logs/gen_find_all.log 2>/dev/null | tail -1 | grep -oE "[0-9]+" | head -1); f2=${f2:-0}
+  grep -q "done.*find_absent_200" logs/gen_find_all.log 2>/dev/null && f2=200
+  printf "  find demos (ok + absent)   %s  (%s/1000 + %s/200)\n" "$(pct $((f1 + f2)) 1200)" "$f1" "$f2"
+  cv=0; for st in "converting failure" "merging" "subset\|frames from" "converting find" "training pick"; do grep -q "$st" logs/stage_verdict.log && cv=$((cv + 1)); done
+  printf "  convert / merge / subsets  %s  (%s/5 stages)\n" "$(pct $cv 5)" "$cv"
+  for sk in pick place find; do
+    lg=outputs/stage_skills/train_${sk}9s_15000.log
     ts=$(train_step $lg); ts=${ts:-0}
-    tot=${name##*_}
-    [ -f "$lg" ] && printf "  train %-14s %s  (step %s/%s)\n" "$name" "$(pct $ts $tot)" "$ts" "$tot" || printf "  train %-14s   0%%  (not started)\n" "$name"
-  done
-  fg=$(last_num outputs/gen_find_1000.log 'saved [0-9]+/1000'); fg=${fg:-0}
-  grep -q "\[find\] done" outputs/gen_find_1000.log 2>/dev/null && fg=1000
-  printf "  find demos               %s  (%s/1000 episodes)\n" "$(pct $fg 1000)" "$fg"
-  for v in direct_still direct_push find_still find_push; do
-    es=$(eval_done outputs/stage_skills/eval_$v.log)
-    printf "  eval %-19s %s  (%s/50)\n" "$v" "$(pct $es 50)" "$es"
+    printf "  train %-20s %s  (step %s/15000)\n" "${sk}9s_15000" "$(pct $ts 15000)" "$ts"
   done
 fi

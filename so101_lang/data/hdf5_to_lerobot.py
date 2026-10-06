@@ -31,6 +31,7 @@ import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from so101_lang.perception.stereo_depth import depth_to_pointmap, depth_to_rgb
+from so101_lang.data.status import STATUS_NAMES, default_status
 
 JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
 
@@ -57,10 +58,12 @@ def make_depth_backend(kind: str, calibration: dict):
 POINTMAP_SIZE = 64
 
 
-def features(height: int, width: int, state_names: list[str], with_depth: bool, with_pointmap: bool = False) -> dict:
+def features(height: int, width: int, state_names: list[str], with_depth: bool, with_pointmap: bool = False,
+             with_status: bool = False) -> dict:
     image = {"dtype": "video", "shape": (height, width, 3), "names": ["height", "width", "channels"]}
     vec = {"dtype": "float32", "shape": (len(state_names),), "names": state_names}
-    act = {"dtype": "float32", "shape": (10,), "names": state_names[:10]}  # TCP pose + gripper opening
+    act_names = state_names[:10] + (STATUS_NAMES if with_status else [])  # TCP pose + gripper opening (+ verdict)
+    act = {"dtype": "float32", "shape": (len(act_names),), "names": act_names}
     depth = {"observation.images.depth": dict(image)} if with_depth else {}
     if with_pointmap:
         depth["observation.pointmap"] = {"dtype": "float32", "shape": (3, POINTMAP_SIZE, POINTMAP_SIZE), "names": None}
@@ -88,6 +91,8 @@ def main():
                         help="Append this many zeros to observation.state (e.g. 9 for find: no target pose yet).")
     parser.add_argument("--skill", choices=["all", "pick", "place", "find"], default="all",
                         help="Keep only the frames of one skill (each episode becomes that skill's segment).")
+    parser.add_argument("--status", action="store_true",
+                        help="12-D action: append the skill verdict [done, success] (so101_lang.data.status).")
     parser.add_argument("--pointmap", choices=DEPTH_KINDS, default="none",
                         help="Backend for observation.pointmap, the (3,64,64) head-frame XYZ map for smolvla_depth.")
     args = parser.parse_args()
@@ -119,7 +124,8 @@ def main():
                     dataset = LeRobotDataset.create(
                         repo_id=args.repo_id,
                         fps=fps,
-                        features=features(*left.shape[1:3], state_names, depth is not None, pm_backend is not None),
+                        features=features(*left.shape[1:3], state_names, depth is not None, pm_backend is not None,
+                                          args.status),
                         root=root,
                         robot_type="so101_follower",
                         use_videos=True,
@@ -130,6 +136,9 @@ def main():
                 if args.pad_state:
                     state = np.concatenate([state, np.zeros((len(state), args.pad_state), state.dtype)], axis=1)
                 joints, skill = ep["joint_pos"][()], ep["skill"][()]
+                if args.status:
+                    status = ep["status"][()] if "status" in ep else default_status(skill)
+                    action = np.concatenate([action, status.astype(action.dtype)], axis=1)
                 frames_kept = range(len(action))
                 if args.skill != "all":
                     frames_kept = np.nonzero(skill == skills.index(args.skill))[0]

@@ -34,11 +34,18 @@ parser.add_argument("--pipeline", choices=["direct", "find"], default="direct",
 parser.add_argument("--target_dim", type=int, choices=[3, 9], default=3,
                     help="Target sent to the policy: 3 = position, 9 = position + 6-D rotation (19-D state models).")
 parser.add_argument("--sam2_every", type=int, default=3, help="Control steps between SAM2 updates during pick.")
+parser.add_argument("--verdict", action="store_true",
+                    help="12-D action models: a skill ends when the model reports done ([done, success] > 0.5 for 2 "
+                         "consecutive actions), not on simulator truth; a failed verdict or a timeout stops the episode "
+                         "(hold still). Each verdict is scored against the simulator.")
 parser.add_argument("--video_out", default="outputs/eval/episode0.mp4", help="Left-camera video of one episode.")
 parser.add_argument("--video_episode", type=int, default=0, help="Which episode to record to --video_out.")
 args, env_cfg = sim_app.parse(parser, TASK)
 env_cfg.scene.num_envs = 1
 env_cfg.episode_length_s = 2 * args.step_timeout + 2
+SUCCESS_TERM = env_cfg.terminations.success
+if args.verdict:
+    env_cfg.terminations.success = None  # place must run until the model reports; success is checked directly
 
 with sim_app.launch(env_cfg, args):
     from multiprocessing.connection import Client
@@ -70,6 +77,23 @@ with sim_app.launch(env_cfg, args):
     adapter = SO101Adapter()
     conn = Client(("localhost", args.port), authkey=b"so101_lang")
     max_steps = int(args.step_timeout / env.step_dt)
+    verdicts = {"pick": [], "place": [], "find": []}  # (verdict: True / False / "timeout", truth: bool)
+
+    def on_plate():
+        return bool(SUCCESS_TERM.func(env, **SUCCESS_TERM.params)[0])
+
+    class Verdict:
+        """Debounced [done, success] reading from the executed actions."""
+        def __init__(self):
+            self.run, self.result = 0, None
+
+        def update(self, a):
+            if not args.verdict or len(a) <= 10:
+                return False
+            self.run = self.run + 1 if float(a[10]) > 0.5 else 0
+            if self.run >= 2:
+                self.result = float(a[11]) > 0.5
+            return self.result is not None
 
     def state_now(head_b):
         pos, quat = math_utils.subtract_frame_transforms(
@@ -177,8 +201,8 @@ with sim_app.launch(env_cfg, args):
         conn.send({"cmd": "reset", "seed": seed, "skill": "find"})
         swap.append(conn.recv().get("swap_ms", 0.0))
         text = language.skill_text("find", object=query)
-        t, cmds = 0, []
-        while t < int(6.0 / env.step_dt):
+        t, cmds, vd = 0, [], Verdict()
+        while t < int(6.0 / env.step_dt) and vd.result is None:
             conn.send({"left": rgb("left_cam"), "right": rgb("right_cam"), "state": state_now(head_b)[0].cpu().numpy(),
                        "task": text, "target": np.zeros(9, np.float32)})
             reply = conn.recv()
@@ -188,14 +212,18 @@ with sim_app.launch(env_cfg, args):
                 t += 1
                 if ep == args.video_episode:
                     frames_out.append(rgb("left_cam"))
+                if vd.update(a):
+                    break
             recent = np.array(cmds[-args.exec_steps:])
-            if t >= 10 and np.linalg.norm(recent - recent.mean(0), axis=1).max() < 0.004:
+            if not args.verdict and t >= 10 and np.linalg.norm(recent - recent.mean(0), axis=1).max() < 0.004:
                 break  # the find policy holds still: it judges the view clear
         conn.send({"cmd": "locate9", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": query})
         pose9 = conn.recv()["pose9"]
         true9 = truth_pose9(name, head_b)
         find_log.append({"obj": query, "steps": t, "pos_err_mm": 1000 * float(np.linalg.norm(pose9[:3] - true9[:3])),
                          "yaw_err_deg": yaw_err_deg(pose9, true9, head_b, name.startswith("cube"))})
+        if args.verdict:  # truth: perception found the object within 3 cm
+            verdicts["find"].append((vd.result if vd.result is not None else "timeout", find_log[-1]["pos_err_mm"] < 30))
         return pose9
 
     def go_home(home_link, head_b, steps=30):
@@ -290,8 +318,8 @@ with sim_app.launch(env_cfg, args):
             target = oracle_target(skill, cube, plate, head_b) if args.target == "oracle" else None
             if args.target in ("perception", "sam2"):
                 target = perceived[skill]
-            t = 0
-            while t < max_steps and not done:
+            t, vd = 0, Verdict()
+            while t < max_steps and not done and vd.result is None:
                 # Dynamic targets: refresh before every query while the object can still move (pick: until
                 # the gripper starts closing on it; place: the plate, which normally stays put).
                 still_tracking = skill == "place" or outcome["close"] is None
@@ -356,13 +384,25 @@ with sim_app.launch(env_cfg, args):
                     if skill == "pick" and lifted:
                         outcome["pick"] = True
                     if term[0] or trunc[0]:
-                        outcome["place"] = bool(env.termination_manager.get_term("success")[0])
+                        outcome["place"] = on_plate()
                         done = True
                         break
-                    if skill == "pick" and outcome["pick"]:
+                    if vd.update(a):
                         break
-                if skill == "pick" and outcome["pick"]:
+                    if skill == "pick" and outcome["pick"] and not args.verdict:
+                        break
+                if skill == "pick" and outcome["pick"] and not args.verdict:
                     break
+            if args.verdict:
+                lifted = float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) > rest_z + 0.03
+                truth = lifted if skill == "pick" else on_plate()
+                if skill == "place":
+                    outcome["place"] = truth
+                verdicts[skill].append((vd.result if vd.result is not None else "timeout", truth))
+                outcome[f"{skill}_verdict"] = verdicts[skill][-1]
+                if vd.result is not True:
+                    break  # failed / timed out: stop and hold, the orchestrator decides what next
+                continue
             if done or (skill == "pick" and not outcome["pick"]):
                 break
         results.append(outcome)
@@ -372,6 +412,9 @@ with sim_app.launch(env_cfg, args):
             close_txt += f" | pushed {outcome['push_mm']:.0f}mm"
         if outcome.get("target_err_at_close") is not None:
             close_txt += f" | target err at close {outcome['target_err_at_close']:.0f}mm"
+        if args.verdict:
+            close_txt += " | verdicts " + " ".join(f"{sk}={outcome[f'{sk}_verdict'][0]}/{outcome[f'{sk}_verdict'][1]}"
+                                                     for sk in ("pick", "place") if f"{sk}_verdict" in outcome)
         print(f"[eval] {ep:3d} '{outcome['goal']}': pick={'ok' if outcome['pick'] else 'FAIL'} "
               f"place={'ok' if outcome['place'] else 'FAIL'} | {close_txt}", flush=True)
         if ep == args.video_episode and frames_out:
@@ -390,6 +433,14 @@ with sim_app.launch(env_cfg, args):
             print(f"[eval] find({kind}): pose position error median {np.median(pe):.0f} mm, >30 mm in {(pe > 30).sum()}/{len(pe)}; "
                   f"yaw error median {np.median(ye):.1f} deg; mean duration {np.mean([f['steps'] for f in fl]) * env.step_dt:.1f} s")
         print(f"[eval] skill swap time: median {np.median(swap):.1f} ms")
+    for sk, vs in verdicts.items():
+        if vs:
+            tp = sum(v is True and t for v, t in vs); tn = sum(v is False and not t for v, t in vs)
+            fp = sum(v is True and not t for v, t in vs); fn = sum(v is False and t for v, t in vs)
+            to = [t for v, t in vs if v == "timeout"]
+            print(f"[eval] verdict {sk}: accuracy {(tp + tn) / max(tp + tn + fp + fn, 1):.0%} on {tp + tn + fp + fn} reports "
+                  f"(pass: {tp} right / {fp} wrong, fail: {tn} right / {fn} wrong); "
+                  f"timeouts {len(to)} ({sum(to)} of them actually succeeded)")
     pushed = [r for r in results if r["push_mm"]]
     if args.push:
         print(f"[eval] pushes: {len(pushed)}/{n} episodes; pick success on pushed episodes "

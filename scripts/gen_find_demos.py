@@ -7,8 +7,14 @@ camera and count as visible when nothing is in front of them. The expert holds s
 of them are visible for 0.3 s (then records 0.5 s of holding and ends); otherwise it moves the TCP toward a
 clear "look" pose (with DART noise on the executed command) until the target becomes visible.
 
+With --absent_prob p, a fraction of episodes are failures: the queried object is parked out of the camera's view
+(behind the head, pose rewritten every step), the expert moves to the look pose, settles for 0.3 s, declares failure
+and holds still for 0.5 s.
+
 Output format matches gen_demos.py (skill index 2 = find), plus per episode:
-    attrs: find_text, object_name ; datasets: target_pose9 (9,) head-frame pos + rot6d, visible_frac (T,)
+    attrs: find_text, object_name, fail_mode ("" or "absent")
+    datasets: target_pose9 (9,) head-frame pos + rot6d (zeros if absent), visible_frac (T,),
+              status (T, 2) (done, success): last 5 hold frames [1, 1] on success, the failure hold [1, 0]
 
     ~/isaacsim/bin/python scripts/gen_find_demos.py --num_envs 16 --episodes 1000 --out datasets/raw/find_1000.h5
 """
@@ -26,6 +32,7 @@ parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--random_start_prob", type=float, default=0.5)
 parser.add_argument("--visible_frac", type=float, default=0.75)
 parser.add_argument("--dart_sigma", type=float, default=0.008)
+parser.add_argument("--absent_prob", type=float, default=0.0, help="Fraction of target-absent (failure) episodes.")
 args, env_cfg = sim_app.parse(parser, TASK)
 env_cfg.seed = args.seed
 env_cfg.scene.left_cam.data_types = ["rgb", "distance_to_image_plane"]
@@ -34,6 +41,7 @@ env_cfg.episode_length_s = 60.0  # episodes are ended by this script, not by the
 # TCP targets in the robot base frame.
 LOOK_POSE = (0.00, -0.06, 0.30)  # arm raised and pulled back: clears the head camera's view (probe_look_pose.py)
 START_BOX = ((-0.10, 0.12), (-0.26, -0.10), (0.06, 0.20))  # random start poses above the workspace
+HIDE_POS = (-0.45, 0.0, 0.60)  # env-local spot behind the head camera where an absent object is parked
 
 with sim_app.launch(env_cfg, args):
     import json
@@ -115,10 +123,12 @@ with sim_app.launch(env_cfg, args):
 
     def new_episode(i):
         k = int(rng.integers(len(objects)))
+        absent = bool(rng.random() < args.absent_prob)
         start = None
         if rng.random() < args.random_start_prob:
             start = np.array([rng.uniform(*START_BOX[0]), rng.uniform(*START_BOX[1]), rng.uniform(*START_BOX[2])])
         return {"k": k, "text": language.random_skill_text("find", object=refs[k]), "start": start,
+                "absent": absent, "fail_at": None,
                 "phase": "pre" if start is not None else "find", "t": 0, "vis_run": 0, "hold": 0, "at_look": 0,
                 "grip": float(rng.uniform(0, 1)), "sigma": float(rng.uniform(0, args.dart_sigma)),
                 "dart": np.zeros(3), "cmd": None, "quat": None, "skip": True,
@@ -136,7 +146,17 @@ with sim_app.launch(env_cfg, args):
     speed = 0.25  # [m/s]
     torch.inference_mode().__enter__()
 
+    def hide_absent():
+        for i, e in enumerate(eps):
+            if e["absent"]:
+                obj = env.scene[objects[e["k"]]]
+                pos = torch.tensor([HIDE_POS], device=dev) + env.scene.env_origins[i : i + 1]
+                ids = torch.tensor([i], device=dev)
+                obj.write_root_pose_to_sim_index(root_pose=torch.cat([pos, obj.data.root_quat_w.torch[i : i + 1]], -1).float(), env_ids=ids)
+                obj.write_root_velocity_to_sim_index(root_velocity=torch.zeros(1, 6, device=dev), env_ids=ids)
+
     while saved < args.episodes:
+        hide_absent()
         link_p, link_q = link_pose_b()
         tcp_b, _ = adapter.tcp_from_link(link_p, link_q)
         tcp_np, link_np, quat_np = tcp_b.cpu().numpy(), link_p.cpu().numpy(), link_q.cpu().numpy()
@@ -163,26 +183,31 @@ with sim_app.launch(env_cfg, args):
                 e["vis_now"] = vis
                 if e["phase"] == "find":
                     e["vis_run"] = e["vis_run"] + 1 if vis >= args.visible_frac else 0
-                    if e["vis_run"] >= 6:
+                    if e["absent"] and e["at_look"] >= 6:  # nothing there after settling at the look pose
+                        e["phase"], e["fail_at"] = "hold", len(e["action"])
+                    elif e["vis_run"] >= 6:
                         e["phase"] = "hold"
                     else:
                         d = look - e["cmd"]
                         step = speed * dt
                         e["cmd"] = look.copy() if np.linalg.norm(d) <= step else e["cmd"] + d / np.linalg.norm(d) * step
-                        if np.linalg.norm(tcp_np[i] - look) < 0.012:
+                        # Settled at the look pose: reached it, or (out of reach) commanded there and stopped moving.
+                        moved = np.linalg.norm(tcp_np[i] - e["prev_tcp"]) if "prev_tcp" in e else 1.0
+                        if np.linalg.norm(tcp_np[i] - look) < 0.012 or (np.allclose(e["cmd"], look) and moved < 0.0015):
                             e["at_look"] += 1
                 elif e["phase"] == "hold":
                     e["hold"] += 1
                 record[i] = not e.pop("skip", False)
+                e["prev_tcp"] = tcp_np[i].copy()
                 e["t"] += 1
                 if e["phase"] == "hold" and e["hold"] >= 10:
                     done.append((i, True))
-                elif e["at_look"] > 20 or e["t"] > 200:
+                elif e["at_look"] > 20 or e["t"] > 200:  # present but never clearly visible: ambiguous, discarded
                     done.append((i, False))
-            # DART offset on the executed command only (not during the pre-roll or the hold).
+            # DART offset on the executed command only (not during the pre-roll, at the look pose or in the hold).
             rho = 0.9
             e["dart"] = rho * e["dart"] + rng.normal(0, e["sigma"] * (1 - rho**2) ** 0.5, 3)
-            executed = e["cmd"] + (e["dart"] if e["phase"] == "find" else 0.0)
+            executed = e["cmd"] + (e["dart"] if e["phase"] == "find" and not np.allclose(e["cmd"], look) else 0.0)
             rot = math_utils.matrix_from_quat(torch.as_tensor(e["quat"], device=dev).unsqueeze(0))
             link_goal = torch.as_tensor(executed, dtype=torch.float32, device=dev) - (
                 rot[0] @ torch.tensor(adapter.tcp_offset, device=dev))
@@ -204,6 +229,7 @@ with sim_app.launch(env_cfg, args):
             if ok and saved < args.episodes and len(e["action"]) >= 8:
                 g5 = h5.create_group(f"episode_{saved:06d}")
                 g5.attrs["find_text"], g5.attrs["object_name"] = e["text"], refs[e["k"]]
+                g5.attrs["fail_mode"] = "absent" if e["absent"] else ""
                 g5.attrs["goal"], g5.attrs["pick_text"], g5.attrs["place_text"] = e["text"], "", ""
                 g5.attrs["cube_idx"], g5.attrs["plate_idx"] = 0, 0
                 for key, name in (("left", "left_rgb"), ("right", "right_rgb")):
@@ -213,7 +239,13 @@ with sim_app.launch(env_cfg, args):
                     g5.create_dataset(key, data=np.stack(e[key]).astype(np.float32))
                 g5.create_dataset("skill", data=np.full(len(e["action"]), FIND, dtype=np.uint8))
                 g5.create_dataset("visible_frac", data=np.asarray(e["vis"], dtype=np.float32))
-                g5.create_dataset("target_pose9", data=target_pose9(i, e["k"]))
+                g5.create_dataset("target_pose9", data=np.zeros(9, np.float32) if e["absent"] else target_pose9(i, e["k"]))
+                status = np.zeros((len(e["action"]), 2), dtype=np.float32)
+                if e["absent"]:
+                    status[e["fail_at"]:] = [1.0, 0.0]
+                else:
+                    status[-5:] = [1.0, 1.0]
+                g5.create_dataset("status", data=status)
                 saved += 1
                 if saved % 20 == 0:
                     h5.flush()

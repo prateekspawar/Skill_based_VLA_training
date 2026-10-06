@@ -73,6 +73,11 @@ class PickPlaceExpert:
         self.initialized = torch.zeros(num_envs, dtype=torch.bool, device=device)
         self.dart_sigma = torch.zeros(num_envs, device=device)
         self.dart_offset = torch.zeros(num_envs, 3, device=device)
+        # Failure injection (all off by default; set per env by scripts/gen_fail_demos.py):
+        self.grasp_offset = torch.zeros(num_envs, 3, device=device)  # added to the grasp point -> misses
+        self.place_offset = torch.zeros(num_envs, 3, device=device)  # added to the release point -> off the plate
+        self.force_open = torch.zeros(num_envs, dtype=torch.bool, device=device)  # open the gripper now (slip / drop)
+        self.freeze = torch.zeros(num_envs, dtype=torch.bool, device=device)  # stop making progress (stall)
 
     def reset(self, env_ids: torch.Tensor | None = None):
         ids = slice(None) if env_ids is None else env_ids
@@ -81,6 +86,10 @@ class PickPlaceExpert:
         self.initialized[ids] = False
         k = self.phase[ids].numel()
         self.dart_offset[ids] = 0.0
+        self.grasp_offset[ids] = 0.0
+        self.place_offset[ids] = 0.0
+        self.force_open[ids] = False
+        self.freeze[ids] = False
         self.dart_sigma[ids] = torch.rand(k, device=self.device) * self.cfg.dart_sigma_max
         if self.cfg.randomize:
             self.hover[ids] = self.cfg.hover_height + (torch.rand(k, device=self.device) - 0.5) * 0.03
@@ -133,9 +142,9 @@ class PickPlaceExpert:
         self.pick_pos = torch.where(tracking, cube[:, :3], self.pick_pos)
 
         # Goal TCP position and gripper command per phase.
-        cube_top = self.pick_pos + torch.tensor([0.0, 0.0, cfg.grasp_depth], device=self.device)
+        cube_top = self.pick_pos + torch.tensor([0.0, 0.0, cfg.grasp_depth], device=self.device) + self.grasp_offset
         hover = self.hover.unsqueeze(-1) * torch.tensor([0.0, 0.0, 1.0], device=self.device)
-        place = plate[:, :3].clone()
+        place = plate[:, :3].clone() + self.place_offset
         place[:, 2] += 0.004 + cfg.place_clearance + 0.015  # plate half-height + clearance + cube half
         goal = torch.where(
             (self.phase == Phase.APPROACH).unsqueeze(-1),
@@ -153,15 +162,17 @@ class PickPlaceExpert:
         closed = (self.phase >= Phase.CLOSE) & (self.phase <= Phase.LOWER)
         grip = torch.where(closed, torch.ones(self.n, device=self.device), torch.full((self.n,), cfg.open_cmd, device=self.device))
         grip = torch.where(self.phase >= Phase.RELEASE, torch.zeros_like(grip), grip)
+        grip = torch.where(self.force_open, torch.zeros_like(grip), grip)
 
         # Rate-limit the commanded TCP toward the goal.
         delta = goal - self.cmd_pos
         dist = torch.linalg.norm(delta, dim=-1, keepdim=True).clamp_min(1e-9)
         step = (self.speed * self.dt).unsqueeze(-1)
-        self.cmd_pos = torch.where(dist > step, self.cmd_pos + delta / dist * step, goal)
+        new_cmd = torch.where(dist > step, self.cmd_pos + delta / dist * step, goal)
+        self.cmd_pos = torch.where(self.freeze.unsqueeze(-1), self.cmd_pos, new_cmd)
 
         # Phase transitions.
-        self.timer += self.dt
+        self.timer += self.dt * (~self.freeze).float()  # a frozen expert neither times out nor advances
         arrived = (torch.linalg.norm(goal - tcp_now, dim=-1) < cfg.reach_tol) & (dist.squeeze(-1) <= step.squeeze(-1))
         timed_out = self.timer > cfg.phase_timeout
         moving_phase = (
@@ -176,7 +187,7 @@ class PickPlaceExpert:
         self.last_timed_out = moving_phase & timed_out & ~arrived
         advance |= (self.phase == Phase.CLOSE) & (self.timer > cfg.close_time)
         advance |= (self.phase == Phase.RELEASE) & (self.timer > cfg.release_time)
-        advance &= self.phase < Phase.DONE
+        advance &= (self.phase < Phase.DONE) & ~self.freeze
         self.phase = torch.where(advance, self.phase + 1, self.phase)
         self.timer = torch.where(advance, torch.zeros_like(self.timer), self.timer)
 
@@ -192,6 +203,7 @@ class PickPlaceExpert:
         near = (self.phase == Phase.DESCEND) | (self.phase == Phase.LOWER)
         scale = torch.where(free, torch.ones_like(scale), scale)
         scale = torch.where(near, torch.full_like(scale, 0.3), scale)
+        scale = torch.where(self.freeze, torch.zeros_like(scale), scale)  # hold still
         executed = self.cmd_pos + self.dart_offset * scale.unsqueeze(-1)
 
         # TCP target -> gripper-link target.
