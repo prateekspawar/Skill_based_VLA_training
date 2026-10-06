@@ -147,6 +147,18 @@ OMNI_KIT_ACCEPT_EULA=YES ~/isaacsim/bin/python scripts/eval_policy.py --episodes
 | **Stage 1 model** (static + moving demos, SAM2-style targets, 20k steps), SAM2, stationary | **64 %** | **44 %** |
 | **Stage 1 model**, SAM2, sliding push | **50 %** | **34 %** (pushed episodes: 18/43 pick, 12/43 full) |
 
+Depth comparison (same 2000 episodes, SAM2-style targets, 20k steps, SAM2 evaluation, 50 paired seeded episodes):
+
+| Model | Stationary pick / full | Sliding push pick / full | Paired full-success wins vs baseline (stationary; push) | Latency |
+|---|---|---|---|---|
+| Baseline, no depth (`mix_target_20000`) | 64 % / 44 % | 50 % / 34 % | — | ~113 ms |
+| D1, Fast-FoundationStereo depth image as camera3 (`d1_depthcam_20000`) | 62 % / 52 % | 42 % / 34 % | 12 vs 8; 2 vs 2 | ~126 ms |
+| D2, native point-map tokens (`d2_pointmap_20000`) | 66 % / 46 % | 44 % / 32 % | 8 vs 7; 8 vs 9 | ~123 ms |
+
+Neither depth variant is a significant improvement: all paired differences are within chance (e.g. 12 vs 8
+discordant episodes for D1 stationary). With a perception-provided 3-D target point the VLA already gets the
+geometry it needs; extra depth input adds ~10–13 ms per query without a measurable gain.
+
 Key findings:
 1. Without a target point, the VLA ignores the instruction's colour word (swapping the colour moves predictions
    ~3 mm vs ~26 mm for images) and closes 4–25 cm from the target. A perception-provided 3-D target fixed grounding.
@@ -157,8 +169,8 @@ Key findings:
    (one deadbanded update after the cube moves; target 24 mm off at close vs 45 mm static) clearly beats static
    perception, while *continuously* refreshed perfect targets (oracle) do worse than SAM2 — the VLA copes with one
    step change but not with a target that keeps changing. Training with moving targets is the next fix.
-5. Stereo-depth image as a third camera: comparison was inconclusive (all variants under-trained); native depth
-   branch (`smolvla_depth` with point map) is built but not yet evaluated.
+5. Depth input to the VLA (colormap depth camera or native point-map tokens) gives no significant gain over the
+   no-depth model once the target point is provided (see the depth comparison table). Depth stays in perception.
 
 ## 8. Not done yet / next steps
 - Wire in the LLM planner (Ollama qwen3-vl:8b, `skills_schema()` as the function list, validation, re-planning).
@@ -167,7 +179,7 @@ Key findings:
 - ~~Train the VLA to follow moving targets~~ done in stage 1 (combined pick + place model). Separate per-skill models
   were considered and dropped: the combined model is the one carried forward. (Tooling remains:
   `hdf5_to_lerobot --skill`, `build_targets --skill`, `policy_server --checkpoint_place`, `run_stage_per_skill.sh`.)
-- Rerun the depth comparison on the working recipe (no depth / colormap depth / native depth tokens).
+- ~~Rerun the depth comparison on the working recipe~~ done: no significant gain from either depth variant.
 - Real robot: hand-eye calibration of the head (`head_in_base`), standalone IK, real stereo camera.
 
 ## 9. File map
