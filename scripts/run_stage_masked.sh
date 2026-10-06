@@ -7,7 +7,7 @@ STEPS=${1:-15000}
 OUT=outputs/stage_masked
 mkdir -p $OUT
 log() { echo "[masked] $(date +%T) $*"; }
-until grep -qE "eval-verdict\] .* (done|failed)" logs/eval_verdict2.log; do sleep 60; done
+# (previously waited for logs/eval_verdict2.log)
 log "smoke test: 40 steps on masked place data"
 rm -rf $OUT/smoke
 DEPTH_CAMERA=0 train/smolvla_depth.sh datasets/lerobot/s512_place9m $OUT/smoke --policy.use_depth_branch=true \

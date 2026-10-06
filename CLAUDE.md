@@ -10,3 +10,5 @@
 - Launch long jobs detached (`setsid nohup <cmd> > log 2>&1 < /dev/null &`): background jobs started through the
   session are killed when the Claude session ends (this interrupted a 20k-step training once). Cron reminders are
   session-only too and must be recreated in a new session.
+- Never edit a shell script while it is running (bash reads scripts incrementally; an edit corrupted a running eval
+  driver once). Wait for it to finish, or copy it under a new name for the change.
