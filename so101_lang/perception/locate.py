@@ -14,6 +14,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from so101_lang import language
 from so101_lang.data.hdf5_to_lerobot import make_depth_backend
 
 OWL_MODEL = "google/owlv2-base-patch16-ensemble"
@@ -130,7 +131,7 @@ def estimate_yaw_base(locator, depth, box, query) -> float:
         return 0.0
     (_, _), (_, _), angle = cv2.minAreaRect((top[:, :2] * 1000).astype(np.float32))
     yaw = np.deg2rad(angle)
-    return float((yaw + np.pi / 4) % (np.pi / 2) - np.pi / 4)
+    return float(language.fold_yaw(yaw, "cube"))
 
 
 def rot6d_from_yaw(yaw_base: float, calib: dict) -> np.ndarray:

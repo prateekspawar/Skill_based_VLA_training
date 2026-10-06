@@ -3,7 +3,7 @@
 #   direct_still / direct_push        skills end on simulator truth (comparable with the D2 combined model)
 #   verdict_still / verdict_push      skills end on the model's own [done, success]; verdicts scored vs truth
 #   find_verdict_still                find(cube), find(plate) with the find model first, then pick / place
-# Usage: scripts/eval_verdict.sh [steps]   (waits for the training pipeline to finish)
+# Usage: [RUNS="direct_still ..."] scripts/eval_verdict.sh [steps]   (waits for the training pipeline to finish)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 STEPS=${1:-15000}
@@ -27,10 +27,18 @@ run() {
     --target sam2 --target_dim 9 "$@" --video_out $OUT/$name.mp4 > $OUT/$name.log 2>&1
   grep -E "\[eval\] (pick success|pushes|verdict|find\(|skill swap)" $OUT/$name.log | sed "s/^/[eval-verdict] $name: /"
 }
-run direct_still
-run direct_push --push
-run verdict_still --verdict
-run verdict_push --push --verdict
-run find_verdict_still --pipeline find --verdict
+for r in ${RUNS:-direct_still direct_push verdict_still verdict_push find_verdict_still}; do
+  case $r in
+    direct_still) run direct_still ;;
+    direct_push) run direct_push --push ;;
+    direct_still_fold) run direct_still_fold --fold_cube_yaw ;;
+    verdict_still) run verdict_still --verdict ;;
+    verdict_push) run verdict_push --push --verdict ;;
+    verdict_first_still) run verdict_first_still --verdict --verdict_from first ;;
+    verdict_first_push) run verdict_first_push --push --verdict --verdict_from first ;;
+    find_verdict_still) run find_verdict_still --pipeline find --verdict ;;
+    find_verdict_first_still) run find_verdict_first_still --pipeline find --verdict --verdict_from first ;;
+  esac
+done
 kill $server; wait $server 2>/dev/null
 log "done"

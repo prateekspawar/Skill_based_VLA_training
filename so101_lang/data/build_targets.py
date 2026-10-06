@@ -150,7 +150,8 @@ def main():
             target[rows, :3] = published_targets(pos, state[rows, :3], skill[rows], rng, args)
             if args.rot6d:  # the active skill's object orientation (constant within the episode) + detection error
                 noisy = yaws[int(e)] + np.deg2rad(rng.normal(0, args.yaw_sigma_deg, 2)) * np.array([1.0, 0.0])
-                r6 = np.stack([rot6d_head(wrap_yaw(noisy[0]), head_in_base), rot6d_head(0.0, head_in_base)])
+                # Reported modulo the cube's 90 deg symmetry, as perception (locate9) does.
+                r6 = np.stack([rot6d_head(language.fold_yaw(noisy[0], "cube"), head_in_base), rot6d_head(0.0, head_in_base)])
                 target[rows, 3:] = r6[np.clip(skill[rows], 0, 1)]
         new_state = np.concatenate([state, target], axis=1)
         all_states.append(new_state)

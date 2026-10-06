@@ -38,6 +38,12 @@ parser.add_argument("--verdict", action="store_true",
                     help="12-D action models: a skill ends when the model reports done ([done, success] > 0.5 for 2 "
                          "consecutive actions), not on simulator truth; a failed verdict or a timeout stops the episode "
                          "(hold still). Each verdict is scored against the simulator.")
+parser.add_argument("--verdict_from", choices=["executed", "first"], default="executed",
+                    help="executed: read [done, success] from every executed action (later chunk entries are predictions "
+                         "of the future); first: only from the first action of each new chunk (the current frame).")
+parser.add_argument("--fold_cube_yaw", action="store_true",
+                    help="Direct pipeline with 9-D targets: give the cube's true yaw folded to [-45, 45) deg, as perception "
+                         "(locate9) reports it, instead of the unfolded yaw used in training.")
 parser.add_argument("--video_out", default="outputs/eval/episode0.mp4", help="Left-camera video of one episode.")
 parser.add_argument("--video_episode", type=int, default=0, help="Which episode to record to --video_out.")
 args, env_cfg = sim_app.parse(parser, TASK)
@@ -94,8 +100,8 @@ with sim_app.launch(env_cfg, args):
         def __init__(self):
             self.run, self.result = 0, None
 
-        def update(self, a):
-            if not args.verdict or len(a) <= 10:
+        def update(self, a, first=True):
+            if not args.verdict or len(a) <= 10 or (args.verdict_from == "first" and not first):
                 return False
             self.run = self.run + 1 if float(a[10]) > 0.5 else 0
             if self.run >= 2:
@@ -196,6 +202,16 @@ with sim_app.launch(env_cfg, args):
         pos_h, rot_h = bih[:3, :3] @ p_b[0] + bih[:3, 3], bih[:3, :3] @ rot_b
         return torch.cat([pos_h, rot_h[:, 0], rot_h[:, 1]]).cpu().numpy()
 
+    def fold_cube_yaw(pose9, head_b):
+        """Fold the yaw (about base z) of a 9-D head-frame pose into [-45, 45) deg, like locate9 for cubes."""
+        hb = head_b[0, :3, :3].cpu().numpy()
+        yaw = float(np.arctan2(*(hb @ pose9[3:6])[[1, 0]]))
+        yaw = (yaw + np.pi / 4) % (np.pi / 2) - np.pi / 4
+        c, s_ = np.cos(yaw), np.sin(yaw)
+        rz = np.array([[c, -s_, 0.0], [s_, c, 0.0], [0.0, 0.0, 1.0]])
+        r_h = hb.T @ rz
+        return np.concatenate([pose9[:3], r_h[:, 0], r_h[:, 1]]).astype(np.float32)
+
     def yaw_err_deg(est9, true9, head_b, symmetric_90):
         """Yaw difference about the base z axis between two 9-D poses (mod 90 deg for cubes)."""
         hb = head_b[0, :3, :3].cpu().numpy()
@@ -213,13 +229,13 @@ with sim_app.launch(env_cfg, args):
             conn.send({"left": rgb("left_cam"), "right": rgb("right_cam"), "state": state_now(head_b)[0].cpu().numpy(),
                        "task": text, "target": np.zeros(9, np.float32)})
             reply = conn.recv()
-            for a in torch.as_tensor(reply["actions"][: args.exec_steps], device=env.device):
+            for k, a in enumerate(torch.as_tensor(reply["actions"][: args.exec_steps], device=env.device)):
                 env.step(adapter.ik_command(a.unsqueeze(0), head_b))
                 cmds.append(a[:3].cpu().numpy())
                 t += 1
                 if ep == args.video_episode:
                     frames_out.append(rgb("left_cam"))
-                if vd.update(a):
+                if vd.update(a, k == 0):
                     break
             recent = np.array(cmds[-args.exec_steps:])
             if not args.verdict and t >= 10 and np.linalg.norm(recent - recent.mean(0), axis=1).max() < 0.004:
@@ -308,6 +324,8 @@ with sim_app.launch(env_cfg, args):
                 perceived = {"pick": pose_c[:3], "place": pose_p[:3]}
         elif args.target_dim == 9:
             truth = {"pick": truth_pose9(f"cube_{cube}", head_b), "place": truth_pose9(f"plate_{plate}", head_b)}
+            if args.fold_cube_yaw:
+                truth["pick"] = fold_cube_yaw(truth["pick"], head_b)
             rot6d = {sk: v[3:] for sk, v in truth.items()}  # direct mode: rotation from the simulator
         if args.target == "sam2":
             perceived = sam2_targets("sam2_start", cube, plate, head_b)  # from the clear view after find
@@ -349,7 +367,7 @@ with sim_app.launch(env_cfg, args):
                 conn.send(reply_req)
                 reply = conn.recv()
                 latencies.append(reply["t_total"])
-                for a in torch.as_tensor(reply["actions"][: args.exec_steps], device=env.device):
+                for k, a in enumerate(torch.as_tensor(reply["actions"][: args.exec_steps], device=env.device)):
                     if skill == "pick" and outcome["close"] is None and float(a[9]) < 0.5:
                         # First closing command: where is the TCP relative to the target / nearest cube?
                         tcp, cubes = tcp_and_cubes_b()
@@ -391,10 +409,11 @@ with sim_app.launch(env_cfg, args):
                     if skill == "pick" and lifted:
                         outcome["pick"] = True
                     if term[0] or trunc[0]:
-                        outcome["place"] = on_plate()
+                        # The env has already reset: read the success term's value from this step, not the new layout.
+                        outcome["place"] = bool(env.termination_manager.get_term("success")[0]) and not args.verdict
                         done = True
                         break
-                    if vd.update(a):
+                    if vd.update(a, k == 0):
                         break
                     if skill == "pick" and outcome["pick"] and not args.verdict:
                         break
@@ -410,7 +429,7 @@ with sim_app.launch(env_cfg, args):
                     pl = env.scene[f"plate_{plate}"].data.root_pos_w.torch[0]
                     outcome["place_geom"] = (1000 * float(torch.linalg.norm(c[:2] - pl[:2])), 1000 * float(c[2] - pl[2]),
                                              float(adapter.opening_from_joint(robot.data.joint_pos.torch[:, 5])[0]))
-                truth = lifted if skill == "pick" else on_plate()
+                truth = lifted if skill == "pick" else (on_plate() if not done else False)
                 if skill == "place":
                     outcome["place"] = truth
                 verdicts[skill].append((vd.result if vd.result is not None else "timeout", truth))

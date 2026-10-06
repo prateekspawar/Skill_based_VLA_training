@@ -10,6 +10,7 @@ one VLA learns every skill and the planner composes them.
 from __future__ import annotations
 
 import json
+import math
 import random
 from dataclasses import dataclass, field
 
@@ -28,6 +29,18 @@ CUBE_NAMES = list(CUBE_COLORS)
 PLATE_NAMES = list(PLATE_COLORS)
 NUM_CUBES = len(CUBE_NAMES)
 NUM_PLATES = len(PLATE_NAMES)
+
+# Rotational symmetry about the vertical axis [deg] per object kind. Target yaws are reported modulo this period
+# (perception cannot tell symmetric orientations apart): cubes 90, plates 360 (round: yaw is always 0).
+# An asymmetric object would get 360, i.e. its full unbounded orientation.
+YAW_SYMMETRY_DEG = {"cube": 90.0, "plate": 360.0}
+
+
+def fold_yaw(yaw: float, kind: str) -> float:
+    """Fold a yaw [rad] into [-period/2, period/2) for the object kind's symmetry period."""
+    period = math.radians(YAW_SYMMETRY_DEG[kind])
+    return (yaw + period / 2) % period - period / 2
+
 
 # Object references the planner may use as skill arguments.
 OBJECT_REFS = [f"{c} cube" for c in CUBE_NAMES]
