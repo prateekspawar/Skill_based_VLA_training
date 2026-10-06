@@ -59,7 +59,7 @@ def main():
         actions.append(act)
         i = t.schema.get_field_index("action")
         offsets = pa.array(np.arange(0, act.shape[1] * len(act) + 1, act.shape[1], dtype=np.int32))
-        col = pa.ListArray.from_arrays(offsets, pa.array(act.reshape(-1), pa.float32(), from_pandas=True))
+        col = pa.ListArray.from_arrays(offsets, pa.array(act.reshape(-1), pa.float32()))  # NaN stays a float NaN, not null
         t = t.set_column(i, t.schema.field(i), col.cast(t.schema.field(i).type))
         out = dst / f.relative_to(src)
         out.parent.mkdir(parents=True, exist_ok=True)

@@ -104,7 +104,9 @@ with sim_app.launch(env_cfg, args):
             if not args.verdict or len(a) <= 10 or (args.verdict_from == "first" and not first):
                 return False
             self.run = self.run + 1 if float(a[10]) > 0.5 else 0
-            if self.run >= 2:
+            # executed: 2 consecutive actions; first: one query (queries are exec_steps apart, longer than the
+            # 5-frame done label, so two consecutive done readings would almost never happen)
+            if self.run >= (1 if args.verdict_from == "first" else 2):
                 self.result = float(a[11]) > 0.5
             return self.result is not None
 
