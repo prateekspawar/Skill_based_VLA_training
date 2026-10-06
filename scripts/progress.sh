@@ -93,4 +93,8 @@ else
     ts=$(train_step $lg); ts=${ts:-0}
     printf "  train %-20s %s  (step %s/15000)\n" "${sk}9s_15000" "$(pct $ts 15000)" "$ts"
   done
+  for v in direct_still direct_push verdict_still verdict_push find_verdict_still; do
+    es=$(eval_done outputs/stage_verdict/eval/$v.log)
+    printf "  eval %-21s %s  (%s/50)\n" "$v" "$(pct $es 50)" "$es"
+  done
 fi
