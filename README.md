@@ -71,6 +71,26 @@ Process layout (two Python environments that talk over a local socket):
 |---|---|---|
 | `pick` | `object`: red / green / blue / yellow cube | "pick up the {object}" |
 | `place` | `target`: white / pink plate | "place it on the {target}" |
+| `find` | `object`: any cube or plate | "find the {object}" |
+
+### Skill models and the pass/fail verdict (in training)
+- One model per skill (pick, place, find) on a **shared frozen SmolVLA backbone**; the server swaps only the
+  ~100 M trainable tensors (`serve/skills.py`, `policy_server --skills pick=... place=... find=...`).
+- State is 19-D: 10-D TCP + 9-D target pose (position + rot6d, head frame; find gets zeros). Yaw is not folded.
+- **Action is 12-D:** 10-D TCP command + `[done, success]` (`data/status.py`): running `[0,0]`, succeeded `[1,1]`
+  (last 5 frames of a successful skill), failed `[1,0]` (from failure detection on; the robot then holds still).
+  The executor ends a skill when `done > 0.5` for 2 consecutive actions and passes the verdict to the
+  orchestrator. A failed verdict means stop and hold still.
+- Timeouts are judged by the executor (skill time limit / no progress). A memoryless policy cannot tell
+  "stuck for 3 s" from "just started", so no stall demos are generated.
+- Failure demos come from the expert with injected errors; the outcome is checked in the simulator:
+  - pick: grasp miss (2–3.5 cm offset), slip (gripper opens while lifting);
+  - place: released 9–12 cm off the plate, dropped during the carry (`scripts/gen_fail_demos.py`);
+  - find: target absent, i.e. the object is moved out of view (`gen_find_demos.py --absent_prob`).
+- Pipeline: `scripts/run_stage_verdict.sh`. Data:
+  - 2000 success episodes plus 400 pick/place failures → `s512_all9s` → `s512_pick9s` / `s512_place9s`;
+  - 1000 find successes plus 200 absent → `s512_find9s`.
+- Eval: `eval_policy.py --verdict` scores every verdict against simulator truth.
 
 Training phrasings and held-out phrasings per skill are defined there; `HELDOUT_PAIRS` = (yellow, pink), (green, white).
 
@@ -180,6 +200,8 @@ Key findings:
 - Wire in the LLM planner (Ollama qwen3-vl:8b, `skills_schema()` as the function list, validation, re-planning).
 - Full training run with the target point (current model is a 2,500-step fine-tune).
 - Better first detection (confidence / LLM verification).
+- Verdict skill models (training): eval with `--verdict`, direct and find pipelines, stationary and push; compare
+  with D2 combined (66/46 stationary, 44/32 push) and report verdict accuracy. Then wire the verdict into the planner.
 - ~~Train the VLA to follow moving targets~~ done in stage 1 (combined pick + place model). Separate per-skill models
   were considered and dropped: the combined model is the one carried forward. (Tooling remains:
   `hdf5_to_lerobot --skill`, `build_targets --skill`, `policy_server --checkpoint_place`, `run_stage_per_skill.sh`.)
