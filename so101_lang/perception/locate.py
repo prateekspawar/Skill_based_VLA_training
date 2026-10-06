@@ -96,3 +96,54 @@ class TargetLocator:
             p = p + ray / np.linalg.norm(ray) * OBJECT_HALF_DEPTH[kind]
         return p.astype(np.float32), int(len(pts))
 
+
+
+def _box_points_head(locator, depth, box):
+    """Head-frame 3-D points of all valid pixels inside a detection box."""
+    k = locator.calib["intrinsics"]
+    x0, y0, x1, y1 = [int(round(v)) for v in box]
+    vs, us = np.mgrid[max(y0, 0) : y1 + 1, max(x0, 0) : x1 + 1]
+    d = depth[vs, us]
+    ok = np.isfinite(d)
+    d, u, v = d[ok], us[ok] + 0.5, vs[ok] + 0.5
+    xc, yc = (u - k["cx"]) / k["fx"] * d, (v - k["cy"]) / k["fy"] * d
+    off = locator.calib["cameras"]["left"]["position_in_head"]
+    return np.stack([d + off[0], -xc + off[1], -yc + off[2]], axis=1)
+
+
+def estimate_yaw_base(locator, depth, box, query) -> float:
+    """Object yaw about the base z axis from the top face of its 3-D points (cubes); 0 for plates / unknown.
+
+    A cube's top face only determines yaw modulo 90 deg, so the estimate lies in [-45, 45) deg.
+    """
+    import cv2
+
+    if "cube" not in query:
+        return 0.0
+    hib = np.asarray(locator.calib["head_in_base"])
+    pts_h = _box_points_head(locator, depth, box)
+    pts_b = pts_h @ hib[:3, :3].T + hib[:3, 3]
+    if len(pts_b) < 20:
+        return 0.0
+    top = pts_b[pts_b[:, 2] > np.percentile(pts_b[:, 2], 95) - 0.006]  # the cube's top face
+    if len(top) < 10:
+        return 0.0
+    (_, _), (_, _), angle = cv2.minAreaRect((top[:, :2] * 1000).astype(np.float32))
+    yaw = np.deg2rad(angle)
+    return float((yaw + np.pi / 4) % (np.pi / 2) - np.pi / 4)
+
+
+def rot6d_from_yaw(yaw_base: float, calib: dict) -> np.ndarray:
+    hib = np.asarray(calib["head_in_base"])
+    c, s = np.cos(yaw_base), np.sin(yaw_base)
+    r_head = hib[:3, :3].T @ np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    return np.concatenate([r_head[:, 0], r_head[:, 1]]).astype(np.float32)
+
+
+def locate9(locator: "TargetLocator", left: np.ndarray, right: np.ndarray, query: str) -> tuple[np.ndarray, dict]:
+    """9-D pose (head-frame position + 6-D rotation) of a named object; the output of the find() skill."""
+    point, info = locator.locate(left, right, query)
+    depth = locator.depth.depth(left, right)
+    yaw = estimate_yaw_base(locator, depth, info["box"], query)
+    info["yaw_base_deg"] = float(np.rad2deg(yaw))
+    return np.concatenate([point, rot6d_from_yaw(yaw, locator.calib)]).astype(np.float32), info

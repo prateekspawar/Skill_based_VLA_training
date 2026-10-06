@@ -60,6 +60,7 @@ POINTMAP_SIZE = 64
 def features(height: int, width: int, state_names: list[str], with_depth: bool, with_pointmap: bool = False) -> dict:
     image = {"dtype": "video", "shape": (height, width, 3), "names": ["height", "width", "channels"]}
     vec = {"dtype": "float32", "shape": (len(state_names),), "names": state_names}
+    act = {"dtype": "float32", "shape": (10,), "names": state_names[:10]}  # TCP pose + gripper opening
     depth = {"observation.images.depth": dict(image)} if with_depth else {}
     if with_pointmap:
         depth["observation.pointmap"] = {"dtype": "float32", "shape": (3, POINTMAP_SIZE, POINTMAP_SIZE), "names": None}
@@ -68,7 +69,7 @@ def features(height: int, width: int, state_names: list[str], with_depth: bool, 
         "observation.images.right": dict(image),
         **depth,
         "observation.state": vec,
-        "action": dict(vec),
+        "action": act,
         "so101.joint_pos": {"dtype": "float32", "shape": (len(JOINTS),), "names": [f"{j}.pos" for j in JOINTS]},
         "skill_index": {"dtype": "int64", "shape": (1,), "names": None},
     }
@@ -83,7 +84,9 @@ def main():
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--depth", choices=DEPTH_KINDS, default="fast_foundationstereo",
                         help="Backend for the colormap depth camera (observation.images.depth); 'none' omits it.")
-    parser.add_argument("--skill", choices=["all", "pick", "place"], default="all",
+    parser.add_argument("--pad_state", type=int, default=0,
+                        help="Append this many zeros to observation.state (e.g. 9 for find: no target pose yet).")
+    parser.add_argument("--skill", choices=["all", "pick", "place", "find"], default="all",
                         help="Keep only the frames of one skill (each episode becomes that skill's segment).")
     parser.add_argument("--pointmap", choices=DEPTH_KINDS, default="none",
                         help="Backend for observation.pointmap, the (3,64,64) head-frame XYZ map for smolvla_depth.")
@@ -110,18 +113,22 @@ def main():
                     break
                 ep = h5[name]
                 left, right = ep["left_rgb"][()], ep["right_rgb"][()]
+                state_names = list(h5.attrs["state_names"]) + [
+                    f"target.{c}" for c in ("x", "y", "z", "r11", "r21", "r31", "r12", "r22", "r32")][: args.pad_state]
                 if dataset is None:
                     dataset = LeRobotDataset.create(
                         repo_id=args.repo_id,
                         fps=fps,
-                        features=features(*left.shape[1:3], list(h5.attrs["state_names"]), depth is not None, pm_backend is not None),
+                        features=features(*left.shape[1:3], state_names, depth is not None, pm_backend is not None),
                         root=root,
                         robot_type="so101_follower",
                         use_videos=True,
                         image_writer_threads=8,
                     )
-                texts = {"pick": str(ep.attrs["pick_text"]), "place": str(ep.attrs["place_text"])}
+                texts = {sk: str(ep.attrs.get(f"{sk}_text", "")) for sk in skills}
                 state, action = ep["state"][()], ep["action"][()]
+                if args.pad_state:
+                    state = np.concatenate([state, np.zeros((len(state), args.pad_state), state.dtype)], axis=1)
                 joints, skill = ep["joint_pos"][()], ep["skill"][()]
                 frames_kept = range(len(action))
                 if args.skill != "all":

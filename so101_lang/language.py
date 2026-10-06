@@ -61,6 +61,15 @@ SKILLS: dict[str, Skill] = {
         train_templates=["place it on the {target}", "put it down on the {target}", "set it on the {target}"],
         heldout_templates=["drop it onto the {target}", "release it over the {target}"],
     ),
+    "find": Skill(
+        name="find",
+        description="Move the arm until the camera has a clear view of the given object, then report its 9-D pose "
+        "(position + 6-D rotation, head frame). Run once per object before pick / place.",
+        params={"object": OBJECT_REFS + TARGET_REFS},
+        canonical="find the {object}",
+        train_templates=["find the {object}", "look for the {object}", "locate the {object}"],
+        heldout_templates=["where is the {object}", "search for the {object}"],
+    ),
 }
 
 # (cube, plate) pairs never sampled as a training episode; used by the "new combination" benchmark suite.

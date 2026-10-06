@@ -28,6 +28,11 @@ parser.add_argument("--target", choices=["none", "oracle", "perception", "sam2",
 parser.add_argument("--push", action="store_true",
                     help="Moving-target test: during pick, slide the target cube 3-6 cm over 0.5 s while the gripper is >6 cm away.")
 parser.add_argument("--seed", type=int, default=0, help="Seeds layouts and pushes so runs are comparable.")
+parser.add_argument("--pipeline", choices=["direct", "find"], default="direct",
+                    help="find: run find(cube) and find(plate) with the find model first (9-D poses from perception), "
+                         "return home, then pick/place.")
+parser.add_argument("--target_dim", type=int, choices=[3, 9], default=3,
+                    help="Target sent to the policy: 3 = position, 9 = position + 6-D rotation (19-D state models).")
 parser.add_argument("--sam2_every", type=int, default=3, help="Control steps between SAM2 updates during pick.")
 parser.add_argument("--video_out", default="outputs/eval/episode0.mp4", help="Left-camera video of one episode.")
 parser.add_argument("--video_episode", type=int, default=0, help="Which episode to record to --video_out.")
@@ -150,6 +155,59 @@ with sim_app.launch(env_cfg, args):
             track_status[st] = track_status.get(st, 0) + 1
         return out
 
+    def truth_pose9(name, head_b):
+        """True head-frame 9-D pose of a scene object (plates: zero yaw, they are symmetric)."""
+        root_p, root_q = robot.data.root_pos_w.torch, robot.data.root_quat_w.torch
+        p_b, q_b = math_utils.subtract_frame_transforms(root_p, root_q, env.scene[name].data.root_pos_w.torch,
+                                                         env.scene[name].data.root_quat_w.torch)
+        rot_b = math_utils.matrix_from_quat(q_b)[0] if name.startswith("cube") else torch.eye(3, device=env.device)
+        bih = frames.invert_transform(head_b)[0]
+        pos_h, rot_h = bih[:3, :3] @ p_b[0] + bih[:3, 3], bih[:3, :3] @ rot_b
+        return torch.cat([pos_h, rot_h[:, 0], rot_h[:, 1]]).cpu().numpy()
+
+    def yaw_err_deg(est9, true9, head_b, symmetric_90):
+        """Yaw difference about the base z axis between two 9-D poses (mod 90 deg for cubes)."""
+        hb = head_b[0, :3, :3].cpu().numpy()
+        ya = np.arctan2(*(hb @ est9[3:6])[[1, 0]]); yb = np.arctan2(*(hb @ true9[3:6])[[1, 0]])
+        q = np.pi / 2 if symmetric_90 else 2 * np.pi
+        return abs(np.rad2deg((ya - yb + q / 2) % q - q / 2))
+
+    def run_find(query, name, head_b, ep, seed):
+        """Run the find model until the arm holds still (or 6 s), then ask perception for the object's 9-D pose."""
+        conn.send({"cmd": "reset", "seed": seed, "skill": "find"})
+        swap.append(conn.recv().get("swap_ms", 0.0))
+        text = language.skill_text("find", object=query)
+        t, cmds = 0, []
+        while t < int(6.0 / env.step_dt):
+            conn.send({"left": rgb("left_cam"), "right": rgb("right_cam"), "state": state_now(head_b)[0].cpu().numpy(),
+                       "task": text, "target": np.zeros(9, np.float32)})
+            reply = conn.recv()
+            for a in torch.as_tensor(reply["actions"][: args.exec_steps], device=env.device):
+                env.step(adapter.ik_command(a.unsqueeze(0), head_b))
+                cmds.append(a[:3].cpu().numpy())
+                t += 1
+                if ep == args.video_episode:
+                    frames_out.append(rgb("left_cam"))
+            recent = np.array(cmds[-args.exec_steps:])
+            if t >= 10 and np.linalg.norm(recent - recent.mean(0), axis=1).max() < 0.004:
+                break  # the find policy holds still: it judges the view clear
+        conn.send({"cmd": "locate9", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": query})
+        pose9 = conn.recv()["pose9"]
+        true9 = truth_pose9(name, head_b)
+        find_log.append({"obj": query, "steps": t, "pos_err_mm": 1000 * float(np.linalg.norm(pose9[:3] - true9[:3])),
+                         "yaw_err_deg": yaw_err_deg(pose9, true9, head_b, name.startswith("cube"))})
+        return pose9
+
+    def go_home(home_link, head_b, steps=30):
+        """Scripted return of the gripper link to its episode-start (home) position over ~1.5 s."""
+        pos, quat = math_utils.subtract_frame_transforms(
+            robot.data.root_pos_w.torch, robot.data.root_quat_w.torch,
+            robot.data.body_pos_w.torch[:, gi], robot.data.body_quat_w.torch[:, gi])
+        grip = 1.0 - adapter.opening_from_joint(robot.data.joint_pos.torch[:, 5]).unsqueeze(-1)
+        for k in range(steps + 10):
+            a = min((k + 1) / steps, 1.0)
+            env.step(torch.cat([pos + (home_link[0] - pos) * a, home_link[1], grip], -1))
+
     PUSH_TIME = 0.5  # [s] the cube slides over this long
 
     def plan_push(cube, rng):
@@ -182,6 +240,7 @@ with sim_app.launch(env_cfg, args):
         obj.write_root_velocity_to_sim_index(root_velocity=torch.zeros(1, 6, device=env.device), env_ids=ids)
 
     results, frames_out, latencies, perception_err = [], [], [], []
+    find_log, swap = [], []
     track_err, track_status = [], {}
     torch.inference_mode().__enter__()
     for ep in range(args.episodes):
@@ -202,8 +261,23 @@ with sim_app.launch(env_cfg, args):
             if args.target == "perception" else {}
         )
         ep_steps = 0
+        rot6d = {}
+        if args.pipeline == "find":
+            home_link = math_utils.subtract_frame_transforms(
+                robot.data.root_pos_w.torch, robot.data.root_quat_w.torch,
+                robot.data.body_pos_w.torch[:, gi], robot.data.body_quat_w.torch[:, gi])
+            pose_c = run_find(language.cube_ref(cube), f"cube_{cube}", head_b, ep, args.seed * 100000 + ep * 10 + 7)
+            pose_p = run_find(language.plate_ref(plate), f"plate_{plate}", head_b, ep, args.seed * 100000 + ep * 10 + 8)
+            rot6d = {"pick": pose_c[3:], "place": pose_p[3:]}
+            if args.target != "sam2":
+                perceived = {"pick": pose_c[:3], "place": pose_p[:3]}
+        elif args.target_dim == 9:
+            truth = {"pick": truth_pose9(f"cube_{cube}", head_b), "place": truth_pose9(f"plate_{plate}", head_b)}
+            rot6d = {sk: v[3:] for sk, v in truth.items()}  # direct mode: rotation from the simulator
         if args.target == "sam2":
-            perceived = sam2_targets("sam2_start", cube, plate, head_b)
+            perceived = sam2_targets("sam2_start", cube, plate, head_b)  # from the clear view after find
+        if args.pipeline == "find":
+            go_home(home_link, head_b)
         rng = np.random.default_rng(args.seed * 1000 + ep)
         push_at = rng.uniform(0.3, 1.0)  # [s] into the pick skill
         outcome["push_mm"] = None
@@ -232,8 +306,11 @@ with sim_app.launch(env_cfg, args):
                     target = perceived[skill]
                 if args.target == "oracle_tracked" and still_tracking:
                     target = oracle_target(skill, cube, plate, head_b)
-                reply_req = {"left": rgb("left_cam"), "right": rgb("right_cam"), "state": state_now(head_b)[0].cpu().numpy(), "task": text,
-                             "target": target}
+                    sent = target
+                if target is not None and args.target_dim == 9:
+                    sent = np.concatenate([np.asarray(target, np.float32)[:3], np.asarray(rot6d[skill], np.float32)])
+                reply_req = {"left": rgb("left_cam"), "right": rgb("right_cam"), "state": state_now(head_b)[0].cpu().numpy(),
+                             "task": text, "target": sent}
                 conn.send(reply_req)
                 reply = conn.recv()
                 latencies.append(reply["t_total"])
@@ -306,6 +383,13 @@ with sim_app.launch(env_cfg, args):
     full = sum(r["place"] for r in results)
     print(f"[eval] pick success {pick}/{n} = {pick / n:.0%}; full pick+place {full}/{n} = {full / n:.0%}; "
           f"mean server latency {1000 * np.mean(latencies):.0f} ms")
+    if find_log:
+        for kind in ("cube", "plate"):
+            fl = [f for f in find_log if kind in f["obj"]]
+            pe = np.array([f["pos_err_mm"] for f in fl]); ye = np.array([f["yaw_err_deg"] for f in fl])
+            print(f"[eval] find({kind}): pose position error median {np.median(pe):.0f} mm, >30 mm in {(pe > 30).sum()}/{len(pe)}; "
+                  f"yaw error median {np.median(ye):.1f} deg; mean duration {np.mean([f['steps'] for f in fl]) * env.step_dt:.1f} s")
+        print(f"[eval] skill swap time: median {np.median(swap):.1f} ms")
     pushed = [r for r in results if r["push_mm"]]
     if args.push:
         print(f"[eval] pushes: {len(pushed)}/{n} episodes; pick success on pushed episodes "

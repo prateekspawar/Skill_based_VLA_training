@@ -87,7 +87,9 @@ def build_obs(msg: dict, depth) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", required=True, help="Path to a pretrained_model directory")
+    parser.add_argument("--checkpoint", default=None, help="Path to a pretrained_model directory")
+    parser.add_argument("--skills", nargs="+", default=None, metavar="SKILL=CHECKPOINT",
+                        help="Separate skill models on one shared backbone, e.g. pick=... place=... find=...")
     parser.add_argument("--checkpoint_place", default=None,
                         help="Optional separate model for the place skill (then --checkpoint serves pick).")
     parser.add_argument("--calibration", default=None, help="stereo_calibration.json (defaults to the training dataset's)")
@@ -95,12 +97,22 @@ def main():
     parser.add_argument("--port", type=int, default=6000)
     args = parser.parse_args()
 
-    ckpt = Path(args.checkpoint)
-    cfg, policy, pre, post, depth = load_policy(args.checkpoint, args.depth, args.calibration)
-    models = {"pick": (policy, pre, post)}
-    if args.checkpoint_place:
-        _, p_policy, p_pre, p_post, _ = load_policy(args.checkpoint_place, args.depth, args.calibration)
-        models["place"] = (p_policy, p_pre, p_post)
+    skills = None
+    if args.skills:  # shared-backbone skill models, swapped in place
+        from so101_lang.serve.skills import SkillModels
+
+        ckpts = dict(item.split("=", 1) for item in args.skills)
+        skills = SkillModels(ckpts, args.depth, args.calibration)
+        cfg, depth, ckpt = skills.cfg, skills.depth, Path(next(iter(ckpts.values())))
+        policy, pre, post = skills.activate(skills.active)
+        models = {}
+    else:
+        ckpt = Path(args.checkpoint)
+        cfg, policy, pre, post, depth = load_policy(args.checkpoint, args.depth, args.calibration)
+        models = {"pick": (policy, pre, post)}
+        if args.checkpoint_place:
+            _, p_policy, p_pre, p_post, _ = load_policy(args.checkpoint_place, args.depth, args.calibration)
+            models["place"] = (p_policy, p_pre, p_post)
     active = "pick"
     locator = None  # created on the first "locate"/"track" request
     sam2 = None  # SAM2 point tracker, created on the first "sam2_start" request
@@ -116,14 +128,17 @@ def main():
                     except EOFError:
                         break
                     if msg.get("cmd") == "reset":
-                        active = msg.get("skill", "pick") if msg.get("skill") in models else "pick"
-                        policy, pre, post = models[active]
+                        if skills is not None:
+                            policy, pre, post = skills.activate(msg.get("skill", skills.active))
+                        else:
+                            active = msg.get("skill", "pick") if msg.get("skill") in models else "pick"
+                            policy, pre, post = models[active]
                         policy.reset()
                         if msg.get("seed") is not None:  # reproducible flow-matching noise for paired comparisons
                             torch.manual_seed(int(msg["seed"]))
-                        conn.send({"ok": True})
+                        conn.send({"ok": True, "swap_ms": skills.last_swap_ms if skills else 0.0})
                         continue
-                    if msg.get("cmd") in ("locate", "sam2_start", "sam2_update"):  # perception -> 3-D points (head frame)
+                    if msg.get("cmd") in ("locate", "locate9", "sam2_start", "sam2_update"):  # perception -> 3-D points (head frame)
                         if locator is None:
                             from so101_lang.perception.locate import TargetLocator
 
@@ -133,6 +148,12 @@ def main():
                         if msg["cmd"] == "locate":
                             point, info = locator.locate(msg["left"], msg["right"], msg["query"])
                             conn.send({"point": point, **info, "t_locate": time.time() - t0})
+                            continue
+                        if msg["cmd"] == "locate9":  # find(): 9-D pose of the named object
+                            from so101_lang.perception.locate import locate9
+
+                            pose, info = locate9(locator, msg["left"], msg["right"], msg["query"])
+                            conn.send({"pose9": pose, **info, "t_locate": time.time() - t0})
                             continue
                         if sam2 is None:
                             from so101_lang.perception.sam2_tracker import Sam2PointTracker
