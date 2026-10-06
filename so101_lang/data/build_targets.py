@@ -44,6 +44,29 @@ def true_positions(ep, head_in_base):
     return env_to_head(np.stack([poses[c, :3], poses[p, :3]]), head_in_base)[None]
 
 
+def wrap_yaw(yaw: float) -> float:
+    """Wrap a yaw to [-pi, pi). No symmetry folding: the true object orientation is kept, so asymmetric objects
+    are represented correctly (for symmetric ones the model learns the equivalence)."""
+    return float((yaw + np.pi) % (2 * np.pi) - np.pi)
+
+
+def true_yaws(ep):
+    """Base-frame yaw of the episode's [cube, plate]: cube from its recorded orientation, plate 0 (symmetric)."""
+    poses = ep["init_poses"][()]
+    x, y, z, w = poses[int(ep.attrs["cube_idx"]), 3:7]
+    yaw_env = np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+    yaw_base = yaw_env - np.pi / 2  # the robot base is rotated +90 deg about z in the env frame
+    return np.array([wrap_yaw(yaw_base), 0.0])
+
+
+def rot6d_head(yaw_base: float, head_in_base: np.ndarray) -> np.ndarray:
+    """6-D rotation (first two columns) of a z-rotation by ``yaw_base`` in the base frame, expressed in the head frame."""
+    c, s_ = np.cos(yaw_base), np.sin(yaw_base)
+    r_base = np.array([[c, -s_, 0.0], [s_, c, 0.0], [0.0, 0.0, 1.0]])
+    r_head = head_in_base[:3, :3].T @ r_base
+    return np.concatenate([r_head[:, 0], r_head[:, 1]]).astype(np.float32)
+
+
 def published_targets(pos, tcp, skill, rng, args):
     """Emulate the closed-loop target stream for one episode. pos: (T or 1, 2, 3); tcp: (T, 3); skill: (T,)."""
     T = len(tcp)
@@ -82,6 +105,9 @@ def main():
     ap.add_argument("--pick_every", type=int, default=3)
     ap.add_argument("--place_every", type=int, default=10)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--rot6d", action="store_true",
+                    help="Append the target's 6-D rotation (head frame): 9-D target, 19-D state.")
+    ap.add_argument("--yaw_sigma_deg", type=float, default=3.0, help="Per-episode yaw detection error.")
     ap.add_argument("--skill", choices=["all", "pick", "place"], default="all",
                     help="Must match the --skill used to convert --src (per-skill datasets).")
     args = ap.parse_args()
@@ -94,7 +120,7 @@ def main():
     shutil.copytree(src / "meta", dst / "meta")
     head_in_base = np.array(json.loads((src / "meta" / "stereo_calibration.json").read_text())["head_in_base"])
 
-    positions = []  # per global episode index
+    positions, yaws = [], []  # per global episode index
     for path in args.raw:
         with h5py.File(path, "r") as h5:
             for n in sorted(h5.keys()):
@@ -106,6 +132,7 @@ def main():
                     if len(pos) > 1:
                         pos = pos[keep]
                 positions.append(pos)
+                yaws.append(true_yaws(h5[n]))
 
     tables = [(f, pq.read_table(f)) for f in sorted((src / "data").rglob("*.parquet"))]
     all_states = []
@@ -113,14 +140,18 @@ def main():
         ep = table.column("episode_index").to_numpy()
         skill = np.stack(table.column("skill_index").to_numpy(zero_copy_only=False)).reshape(-1).astype(int)
         state = np.stack(table.column("observation.state").to_numpy(zero_copy_only=False)).astype(np.float32)
-        target = np.zeros((len(ep), 3), dtype=np.float32)
+        target = np.zeros((len(ep), 9 if args.rot6d else 3), dtype=np.float32)
         for e in np.unique(ep):
             rows = np.where(ep == e)[0]
             rows = rows[np.argsort(table.column("frame_index").to_numpy()[rows])]
             pos = positions[int(e)]
             if len(pos) > 1:
                 pos = pos[: len(rows)]
-            target[rows] = published_targets(pos, state[rows, :3], skill[rows], rng, args)
+            target[rows, :3] = published_targets(pos, state[rows, :3], skill[rows], rng, args)
+            if args.rot6d:  # the active skill's object orientation (constant within the episode) + detection error
+                noisy = yaws[int(e)] + np.deg2rad(rng.normal(0, args.yaw_sigma_deg, 2)) * np.array([1.0, 0.0])
+                r6 = np.stack([rot6d_head(wrap_yaw(noisy[0]), head_in_base), rot6d_head(0.0, head_in_base)])
+                target[rows, 3:] = r6[np.clip(skill[rows], 0, 1)]
         new_state = np.concatenate([state, target], axis=1)
         all_states.append(new_state)
         col = pa.FixedSizeListArray.from_arrays(pa.array(new_state.reshape(-1), pa.float32()), new_state.shape[1])
@@ -132,8 +163,9 @@ def main():
     info_path = dst / "meta" / "info.json"
     info = json.loads(info_path.read_text())
     feat = info["features"]["observation.state"]
-    feat["names"] = list(feat["names"])[:10] + TARGET_NAMES
-    feat["shape"] = [13]
+    rot_names = [f"target.{c}" for c in ("r11", "r21", "r31", "r12", "r22", "r32")] if args.rot6d else []
+    feat["names"] = list(feat["names"])[:10] + TARGET_NAMES + rot_names
+    feat["shape"] = [10 + target.shape[1]]
     info_path.write_text(json.dumps(info, indent=4))
     states = np.concatenate(all_states)
     stats_path = dst / "meta" / "stats.json"
@@ -151,7 +183,7 @@ def main():
         elif key.startswith("q") and key[1:].isdigit():
             s[key] = np.quantile(states, int(key[1:]) / 100, axis=0).tolist()
     stats_path.write_text(json.dumps(stats, indent=4))
-    print(f"[targets] {len(positions)} episodes, {len(states)} frames, 13-D state -> {dst}")
+    print(f"[targets] {len(positions)} episodes, {len(states)} frames, {states.shape[1]}-D state -> {dst}")
 
 
 if __name__ == "__main__":
