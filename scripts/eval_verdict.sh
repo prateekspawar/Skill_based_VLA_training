@@ -7,11 +7,13 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 STEPS=${1:-15000}
-OUT=outputs/stage_verdict/eval
+OUT=${EVAL_OUT:-outputs/stage_verdict/eval}
 mkdir -p $OUT
 log() { echo "[eval-verdict] $(date +%T) $*"; }
 until grep -q "^\[verdict\] .* done" logs/stage_verdict.log; do sleep 60; done
-ck() { echo checkpoints/${1}9s_$STEPS/checkpoints/last/pretrained_model; }
+[[ -n "${WAIT_FOR:-}" ]] && until grep -qE "${WAIT_FOR#*:}" "${WAIT_FOR%%:*}"; do sleep 60; done
+# Checkpoint names per skill (override e.g. CK_PICK=pick9fm): checkpoints/<name>_<steps>.
+ck() { local v="CK_${1^^}"; echo checkpoints/${!v:-${1}9s}_$STEPS/checkpoints/last/pretrained_model; }
 ~/lerobot-env/bin/python -m so101_lang.serve.policy_server --skills pick=$(ck pick) place=$(ck place) find=$(ck find) \
   --depth fast_foundationstereo > $OUT/server.log 2>&1 &
 server=$!
@@ -24,7 +26,7 @@ run() {
   local name=$1; shift
   log "running $name"
   OMNI_KIT_ACCEPT_EULA=YES ~/isaacsim/bin/python scripts/eval_policy.py --episodes 50 --step_timeout 8 --seed 0 \
-    --target sam2 --target_dim 9 "$@" --video_out $OUT/$name.mp4 > $OUT/$name.log 2>&1
+    --target sam2 --target_dim 9 ${EVAL_EXTRA:-} "$@" --video_out $OUT/$name.mp4 > $OUT/$name.log 2>&1
   grep -E "\[eval\] (pick success|pushes|verdict|find\(|skill swap)" $OUT/$name.log | sed "s/^/[eval-verdict] $name: /"
 }
 for r in ${RUNS:-direct_still direct_push verdict_still verdict_push find_verdict_still}; do

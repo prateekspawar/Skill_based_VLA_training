@@ -25,20 +25,21 @@ from so101_lang import language
 
 
 def vec_stats(x: np.ndarray, like: dict) -> dict:
+    """Per-dim statistics in the layout of ``like``; NaN entries (masked action dims) are ignored."""
     out = {}
     for key in like:
         if key == "mean":
-            out[key] = x.mean(0).tolist()
+            out[key] = np.nanmean(x, 0).tolist()
         elif key == "std":
-            out[key] = x.std(0).tolist()
+            out[key] = np.nanstd(x, 0).tolist()
         elif key == "min":
-            out[key] = x.min(0).tolist()
+            out[key] = np.nanmin(x, 0).tolist()
         elif key == "max":
-            out[key] = x.max(0).tolist()
+            out[key] = np.nanmax(x, 0).tolist()
         elif key == "count":
             out[key] = [len(x)]
         elif key.startswith("q") and key[1:].isdigit():
-            out[key] = np.quantile(x, int(key[1:]) / 100, axis=0).tolist()
+            out[key] = np.nanquantile(x, int(key[1:]) / 100, axis=0).tolist()
         else:
             out[key] = like[key]
     return out

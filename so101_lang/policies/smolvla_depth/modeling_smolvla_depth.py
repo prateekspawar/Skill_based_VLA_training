@@ -106,7 +106,27 @@ class SmolVLADepthPolicy(SmolVLAPolicy):
             batch = dict(batch)
             n = offset.shape[-1]
             batch[ACTION] = torch.cat([batch[ACTION][..., :n] - offset, batch[ACTION][..., n:]], dim=-1)
-        return super().forward(batch, noise=noise, time=time, reduction=reduction)
+        # Masked action entries (NaN, e.g. the motion of failure demonstrations before the failure is detected,
+        # see so101_lang/data/mask_failure_motion.py): fed to the flow-matching input as 0 and left out of the loss.
+        act = batch.get(ACTION)
+        if act is None or torch.isfinite(act).all():
+            return super().forward(batch, noise=noise, time=time, reduction=reduction)
+        valid = torch.isfinite(act)
+        batch = dict(batch)
+        batch[ACTION] = torch.where(valid, act, torch.zeros_like(act))
+        inner = self.model.forward
+
+        def masked_forward(*a, **kw):
+            losses = inner(*a, **kw)  # (B, T, max_action_dim)
+            m = torch.ones_like(losses)
+            m[..., : valid.shape[-1]] = valid.to(losses.dtype)
+            return losses * m
+
+        self.model.forward = masked_forward
+        try:
+            return super().forward(batch, noise=noise, time=time, reduction=reduction)
+        finally:
+            del self.model.forward  # back to the class method
 
     def _get_action_chunk(self, batch, noise=None, **kwargs):
         self._set_pointmap(batch)
