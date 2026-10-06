@@ -12,6 +12,7 @@ PY=~/lerobot-env/bin/python
 mkdir -p $OUT
 log() { echo "[verdict] $(date +%T) $*"; }
 
+if [[ ! -f $L/s512_all9s/meta/info.json ]]; then  # resumable: finished steps are skipped
 log "waiting for raw data"
 until grep -q "\[fail\] done" logs/gen_fail_400.log 2>/dev/null; do sleep 60; done
 log "converting failure episodes (depth video + point map + status)"
@@ -32,17 +33,21 @@ $PY -m so101_lang.data.pointmap_merge strip $L/s512_fail_target9s $L/_f9s_nopm >
 $PY -m so101_lang.data.pointmap_merge attach $L/s512_all9s_nopm $L/s512_all9s \
   $L/s512_mix_depth_target9s $L/s512_fail_target9s >> $OUT/pointmap.log 2>&1 || { log "attach failed"; exit 1; }
 cp $L/s512_mix_depth_target9s/meta/stereo_calibration.json $L/s512_all9s/meta/
+fi
 for sk in pick place; do
+  [[ -f $L/s512_${sk}9s/meta/info.json ]] && continue
   $PY -m so101_lang.data.skill_subset --src $L/s512_all9s --dst $L/s512_${sk}9s --skill $sk > $OUT/subset_$sk.log 2>&1 \
     || { log "subset $sk failed"; exit 1; }
   tail -1 $OUT/subset_$sk.log | sed "s/^/[verdict] /"
 done
 
 until grep -q "\[find\] done.*absent" logs/gen_find_all.log 2>/dev/null; do sleep 60; done
+[[ -f $L/s512_find9s/meta/info.json ]] || {
 log "converting find episodes (point map + status, state padded to 19-D)"
 $PY -m so101_lang.data.hdf5_to_lerobot --inputs $R/find_1000.h5 $R/find_absent_200.h5 --root $L/s512_find9s \
   --depth none --pointmap fast_foundationstereo --status --pad_state 9 --overwrite > $OUT/convert_find.log 2>&1 \
   || { log "convert find failed"; exit 1; }
+}
 
 log "training pick, place, find ($STEPS steps each)"
 DS_SUFFIX=s scripts/run_stage_skills.sh $STEPS pick place find
