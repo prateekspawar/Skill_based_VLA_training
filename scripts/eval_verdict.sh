@@ -39,6 +39,8 @@ for r in ${RUNS:-direct_still direct_push verdict_still verdict_push find_verdic
     verdict_first_still) run verdict_first_still --verdict --verdict_from first ;;
     verdict_first_push) run verdict_first_push --push --verdict --verdict_from first ;;
     find_verdict_still) run find_verdict_still --pipeline find --verdict ;;
+    direct_verdict_first_still) run direct_verdict_first_still --pipeline direct --fold_cube_yaw --verdict --verdict_from first ;;
+    direct_verdict_first_push) run direct_verdict_first_push --pipeline direct --fold_cube_yaw --push --verdict --verdict_from first ;;
     find_verdict_first_still) run find_verdict_first_still --pipeline find --verdict --verdict_from first ;;
     find_verdict_first_push) run find_verdict_first_push --pipeline find --push --verdict --verdict_from first ;;
   esac

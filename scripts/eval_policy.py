@@ -442,6 +442,11 @@ with sim_app.launch(env_cfg, args):
         outcome["push_mm"] = None
         push = {"vel": None, "steps_left": 0, "start": None}
         done = False
+        if not find_failed and rot6d.get("pick") is not None:
+            true_c = truth_pose9(f"cube_{cube}", head_b)
+            outcome["pick_start"] = {
+                "yaw_err": yaw_err_deg(np.concatenate([true_c[:3], rot6d["pick"]]), true_c, head_b, True),
+                "opening": float(state_now(head_b)[0, 9])}
         if find_failed:
             steps = []  # find() failed after all retries: stop and hold, report to the orchestrator
         for skill_i, (skill, text) in enumerate(steps):
@@ -484,6 +489,8 @@ with sim_app.launch(env_cfg, args):
                         d = torch.linalg.norm(cubes[:, :2] - tcp[:2], dim=1)
                         near = int(torch.argmin(d))
                         outcome["close"] = (1000 * float(d[cube]), 1000 * float(tcp[2] - cubes[cube, 2]), language.CUBE_NAMES[near])
+                        st = state_now(head_b)[0].cpu().numpy()
+                        outcome["close_yaw"] = yaw_err_deg(st[:9], truth_pose9(f"cube_{cube}", head_b), head_b, True)
                         if target is not None:
                             outcome["target_err_at_close"] = 1000 * float(np.linalg.norm(target - oracle_target("pick", cube, plate, head_b)))
                     _, _, term, trunc, _ = env.step(adapter.ik_command(a.unsqueeze(0), head_b))
@@ -596,6 +603,11 @@ with sim_app.launch(env_cfg, args):
             close_txt += (f" | cube target: at find {fs[-1] if fs else float('nan'):.0f}mm, max during plate find/home "
                           f"{bgm:.0f}mm, at pick start "
                           f"{outcome['pick_target_start_err']:.0f}mm")
+        if outcome.get("pick_start"):
+            close_txt += (f" | pick start: target yaw err {outcome['pick_start']['yaw_err']:.0f}deg, gripper opening "
+                          f"{outcome['pick_start']['opening']:.2f}")
+        if outcome.get("close_yaw") is not None:
+            close_txt += f" | jaw-cube yaw at close {outcome['close_yaw']:.0f}deg"
         if not outcome["pick"] and outcome.get("pick_verdict_at"):
             t_, d_, o_ = outcome["pick_verdict_at"]
             close_txt += f" | pick verdict at step {t_}: tcp-cube {d_:.0f}mm, gripper opening {o_:.2f}"
@@ -636,6 +648,13 @@ with sim_app.launch(env_cfg, args):
         n_retry = sum(r.get("find_pick_attempts", 1) + r.get("find_place_attempts", 1) - 2 for r in results)
         print(f"[eval] find: {sum(bool(r.get('find_failed')) for r in results)}/{n} episodes stopped (find failed after "
               f"{args.find_retries} retries); {n_retry} retries in total")
+    def med(xs):
+        return f"{np.median(xs):.1f}" if xs else "-"
+    for name, sel in (("picked", [r for r in results if r["pick"]]),
+                      ("missed (closed, not lifted)", [r for r in results if not r["pick"] and r.get("close")])):
+        print(f"[eval] pick {name} n={len(sel)}: median target yaw err {med([r['pick_start']['yaw_err'] for r in sel if r.get('pick_start')])} deg, "
+              f"jaw-cube yaw at close {med([r['close_yaw'] for r in sel if r.get('close_yaw') is not None])} deg, "
+              f"close offset dxy {med([r['close'][0] for r in sel])} mm, start opening {med([r['pick_start']['opening'] for r in sel if r.get('pick_start')])}")
     causes = [r["place_cause"] for r in results if r.get("place_cause")]
     if causes:
         from collections import Counter
