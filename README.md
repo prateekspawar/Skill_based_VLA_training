@@ -210,6 +210,18 @@ Find is `find9s_15000`.
 | same, push | 40 % | 18 % | 80 / 43 / – % |
 | **find → pick → place**, verdict-ended, stationary | **76 %** | **44 %** | 85 / 57 / 73 % |
 
+**Find pipeline v2 (150 seeded episodes, ±4 pts; 2026-10-07).** Each object is tracked from its own find view, the
+cube keeps tracking during find(plate) and the return home, and the same trackers run through pick and place.
+find is retried only when both the find model and the detector name check say "not found". A fail verdict needs
+two consecutive readings. Stationary: **pick 73 %, full 48 %** (place after a good pick 66 %). Push: pick 29 %,
+full 20 %.
+- Stationary pick failures (41): grasp missed with a good target 21, cube tracker drift before pick 6, wrong cube
+  at find 5, target wrong during pick 3, never closed 5, find failed 1.
+- Push pick failures (106): grasp missed 59, target wrong during pick 25, wrong cube at find 13.
+- Stationary place failures (37): never released 14, wrong plate target 12, released off the plate 6, dropped 3.
+- find acceptance: 300/314 accepted, 19–32 accepted with a pose >30 mm off, 12–16 correct finds rejected.
+  The name check fails on plates (pale colours) about 90 times per run; plate colours will be changed.
+
 Findings:
 1. **Find works as intended.** Wrong-target pick failures fall from 13 to 5 per 50 episodes. Find pose error is
    1 mm (cube) / 7 mm (plate) median. Pick reaches 76 %, the best so far, even though the skills end on the model's
