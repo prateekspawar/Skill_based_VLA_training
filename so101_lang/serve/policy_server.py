@@ -138,7 +138,7 @@ def main():
                             torch.manual_seed(int(msg["seed"]))
                         conn.send({"ok": True, "swap_ms": skills.last_swap_ms if skills else 0.0})
                         continue
-                    if msg.get("cmd") in ("locate", "locate9", "sam2_start", "sam2_update"):  # perception -> 3-D points (head frame)
+                    if msg.get("cmd") in ("locate", "locate9", "find_start", "sam2_start", "sam2_update", "sam2_reset"):
                         if locator is None:
                             from so101_lang.perception.locate import TargetLocator
 
@@ -156,10 +156,22 @@ def main():
                             conn.send({"pose9": pose, **info, "t_locate": time.time() - t0})
                             continue
                         if sam2 is None:
-                            from so101_lang.perception.sam2_tracker import Sam2PointTracker
+                            from so101_lang.perception.sam2_tracker import Sam2MultiTracker
 
-                            sam2 = Sam2PointTracker(locator)
+                            sam2 = Sam2MultiTracker(locator)
                         robot_points = msg.get("robot_points")  # robot keypoints (head frame) for the self-filter
+                        if msg["cmd"] == "sam2_reset":
+                            sam2.reset()
+                            conn.send({"ok": True})
+                            continue
+                        if msg["cmd"] == "find_start":  # end of find(query): 9-D pose + start tracking it from this view
+                            from so101_lang.perception.locate import locate9
+
+                            pose, linfo = locate9(locator, msg["left"], msg["right"], msg["query"])
+                            points, info = sam2.add(msg["left"], msg["right"], msg["query"], robot_points)
+                            conn.send({"pose9": pose, "score": linfo["score"], "points": points, "info": info,
+                                       "t_locate": time.time() - t0})
+                            continue
                         if msg["cmd"] == "sam2_start":
                             points, info = sam2.start(msg["left"], msg["right"], msg["queries"], robot_points)
                         else:

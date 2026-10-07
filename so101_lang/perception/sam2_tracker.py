@@ -51,6 +51,7 @@ class Sam2PointTracker:
         max_jump: float = 0.04,
         confirm_radius: float = 0.015,
         deadband: float = 0.025,
+        shared: "Sam2PointTracker | None" = None,
     ):
         from transformers import Sam2VideoModel, Sam2VideoProcessor
 
@@ -58,8 +59,11 @@ class Sam2PointTracker:
         self.min_mask_px, self.self_filter_radius = min_mask_px, self_filter_radius
         self.max_area_growth, self.max_jump, self.confirm_radius = max_area_growth, max_jump, confirm_radius
         self.deadband = deadband
-        self.processor = Sam2VideoProcessor.from_pretrained(model_id)
-        self.model = Sam2VideoModel.from_pretrained(model_id).to(device).eval()
+        if shared is not None:  # reuse another tracker's weights (one SAM2 model, several sessions)
+            self.processor, self.model = shared.processor, shared.model
+        else:
+            self.processor = Sam2VideoProcessor.from_pretrained(model_id)
+            self.model = Sam2VideoModel.from_pretrained(model_id).to(device).eval()
         self.session, self.queries = None, []
         self.points, self.area0, self.pending = {}, {}, {}  # points = tracked mask points
         self.base, self.ref = {}, {}  # box-based detection and mask point at the start
@@ -90,7 +94,7 @@ class Sam2PointTracker:
         )
 
     @torch.no_grad()
-    def _step(self, left, right, robot_points, prompt_boxes=None, frozen=()):
+    def _step(self, left, right, robot_points, prompt_boxes=None, frozen=(), depth=None):
         inputs = self.processor(images=left, device=self.device, return_tensors="pt")
         if prompt_boxes is not None:
             self.processor.add_inputs_to_inference_session(
@@ -103,7 +107,8 @@ class Sam2PointTracker:
         out = self.model(inference_session=self.session, frame=inputs.pixel_values[0])
         masks = self.processor.post_process_masks([out.pred_masks], original_sizes=inputs.original_sizes)[0]
         visible = (out.object_score_logits.reshape(-1) > 0).cpu().numpy()
-        depth = self.locator.depth.depth(left, right)
+        if depth is None:
+            depth = self.locator.depth.depth(left, right)
         info = {}
         for i, query in enumerate(self.queries):
             mask = masks[i, 0].cpu().numpy().astype(bool)
@@ -158,9 +163,63 @@ class Sam2PointTracker:
             info[q]["score"] = scores[q]
         return self.published(), info
 
-    def update(self, left, right, robot_points=None, frozen=()):
+    def update(self, left, right, robot_points=None, frozen=(), depth=None):
         """Propagate masks to a new frame. Objects in ``frozen`` keep their point (masks still propagate)."""
         if self.session is None:
             raise RuntimeError("call start() first")
-        info = self._step(left, right, robot_points, frozen=tuple(frozen))
+        info = self._step(left, right, robot_points, frozen=tuple(frozen), depth=depth)
+        return self.published(), info
+
+
+class Sam2MultiTracker:
+    """One SAM2 session per object, so objects can be added at different times (each from its own find() view)
+    and all keep tracking through every later frame. One SAM2 model and one depth map per frame are shared.
+
+        mt = Sam2MultiTracker(locator)
+        mt.add(left, right, "red cube", robot_points)     # after find(red cube)
+        mt.update(left, right, robot_points)              # every few control steps from now on (cube keeps tracking)
+        mt.add(left, right, "pink plate", robot_points)   # after find(pink plate)
+        points, info = mt.update(left, right, robot_points, frozen=("red cube",))
+    """
+
+    def __init__(self, locator: TargetLocator, **kwargs):
+        self.locator, self.kwargs = locator, kwargs
+        self.trackers: dict[str, Sam2PointTracker] = {}
+        self._model_owner: Sam2PointTracker | None = None
+
+    def reset(self):
+        self.trackers = {}
+
+    def published(self) -> dict:
+        out = {}
+        for t in self.trackers.values():
+            out.update(t.published())
+        return out
+
+    def add(self, left, right, query, robot_points=None):
+        """(Re)start tracking ``query`` from this frame: OWLv2 box -> SAM2 prompt; other objects are untouched."""
+        if self._model_owner is None:
+            self._model_owner = Sam2PointTracker(self.locator, **self.kwargs)
+            t = self._model_owner
+        else:
+            t = Sam2PointTracker(self.locator, shared=self._model_owner, **self.kwargs)
+        _, info = t.start(left, right, [query], robot_points)
+        self.trackers[query] = t
+        return self.published(), info
+
+    def start(self, left, right, queries, robot_points=None):
+        """All objects from the same frame (direct pipeline)."""
+        self.reset()
+        info = {}
+        for q in queries:
+            info.update(self.add(left, right, q, robot_points)[1])
+        return self.published(), info
+
+    def update(self, left, right, robot_points=None, frozen=()):
+        if not self.trackers:
+            return {}, {}
+        depth = self.locator.depth.depth(left, right)
+        info = {}
+        for q, t in self.trackers.items():
+            info.update(t.update(left, right, robot_points, frozen=tuple(f for f in frozen if f == q), depth=depth)[1])
         return self.published(), info

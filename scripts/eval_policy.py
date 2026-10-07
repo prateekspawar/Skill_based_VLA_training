@@ -28,9 +28,12 @@ parser.add_argument("--target", choices=["none", "oracle", "perception", "sam2",
 parser.add_argument("--push", action="store_true",
                     help="Moving-target test: during pick, slide the target cube 3-6 cm over 0.5 s while the gripper is >6 cm away.")
 parser.add_argument("--seed", type=int, default=0, help="Seeds layouts and pushes so runs are comparable.")
-parser.add_argument("--pipeline", choices=["direct", "find"], default="direct",
-                    help="find: run find(cube) and find(plate) with the find model first (9-D poses from perception), "
-                         "return home, then pick/place.")
+parser.add_argument("--pipeline", choices=["direct", "find"], default="find",
+                    help="find (default): find(cube) -> start tracking the cube from that view -> find(plate) while the "
+                         "cube keeps tracking -> start tracking the plate -> return home -> pick -> place, all on the "
+                         "same trackers. direct: detect both objects from the home view, then pick -> place.")
+parser.add_argument("--find_retries", type=int, default=2,
+                    help="Retries of a find() whose model reports failure (each retry starts from home).")
 parser.add_argument("--target_dim", type=int, choices=[3, 9], default=3,
                     help="Target sent to the policy: 3 = position, 9 = position + 6-D rotation (19-D state models).")
 parser.add_argument("--sam2_every", type=int, default=3, help="Control steps between SAM2 updates during pick.")
@@ -97,11 +100,11 @@ with sim_app.launch(env_cfg, args):
 
     class Verdict:
         """Debounced [done, success] reading from the executed actions."""
-        def __init__(self):
-            self.run, self.result = 0, None
+        def __init__(self, always=False):
+            self.run, self.result, self.always = 0, None, always
 
         def update(self, a, first=True):
-            if not args.verdict or len(a) <= 10 or (args.verdict_from == "first" and not first):
+            if not (args.verdict or self.always) or len(a) <= 10 or (args.verdict_from == "first" and not first):
                 return False
             self.run = self.run + 1 if float(a[10]) > 0.5 else 0
             # executed: 2 consecutive actions; first: one query (queries are exec_steps apart, longer than the
@@ -244,12 +247,27 @@ with sim_app.launch(env_cfg, args):
         q = np.pi / 2 if symmetric_90 else 2 * np.pi
         return abs(np.rad2deg((ya - yb + q / 2) % q - q / 2))
 
+    tracked = []  # objects whose SAM2 tracker is running (find pipeline)
+
+    def bg_track(head_b):
+        """Advance every running tracker by one frame (objects keep tracking while the arm does something else)."""
+        if args.target != "sam2" or not tracked:
+            return None
+        conn.send({"cmd": "sam2_update", "left": rgb("left_cam"), "right": rgb("right_cam"),
+                   "robot_points": robot_points_head(head_b), "frozen": []})
+        reply = conn.recv()
+        for q, st in reply["info"].items():
+            track_status[st["status"]] = track_status.get(st["status"], 0) + 1
+        return reply["points"]
+
     def run_find(query, name, head_b, ep, seed):
-        """Run the find model until the arm holds still (or 6 s), then ask perception for the object's 9-D pose."""
+        """Run the find model until it reports (or holds still / 6 s), then get the object's 9-D pose from this view
+        and (SAM2 targets) start tracking it here. Returns (pose9, ok, points); ok = the model did not report failure."""
         conn.send({"cmd": "reset", "seed": seed, "skill": "find"})
         swap.append(conn.recv().get("swap_ms", 0.0))
         text = language.skill_text("find", object=query)
-        t, cmds, vd = 0, [], Verdict()
+        t, cmds = 0, []
+        vd = Verdict(always=True)  # find always ends on its own verdict when the model has one
         while t < int(6.0 / env.step_dt) and vd.result is None:
             conn.send({"left": rgb("left_cam"), "right": rgb("right_cam"), "state": state_now(head_b)[0].cpu().numpy(),
                        "task": text, "target": np.zeros(9, np.float32)})
@@ -258,23 +276,37 @@ with sim_app.launch(env_cfg, args):
                 env.step(adapter.ik_command(a.unsqueeze(0), head_b))
                 cmds.append(a[:3].cpu().numpy())
                 t += 1
+                if t % args.sam2_every == 0:
+                    bg_track(head_b)
                 if ep == args.video_episode:
                     frames_out.append(rgb("left_cam"))
                 if vd.update(a, k == 0):
                     break
             recent = np.array(cmds[-args.exec_steps:])
-            if not args.verdict and t >= 10 and np.linalg.norm(recent - recent.mean(0), axis=1).max() < 0.004:
-                break  # the find policy holds still: it judges the view clear
-        conn.send({"cmd": "locate9", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": query})
-        pose9 = conn.recv()["pose9"]
+            if vd.result is None and len(reply["actions"][0]) <= 10 and t >= 10 \
+                    and np.linalg.norm(recent - recent.mean(0), axis=1).max() < 0.004:
+                break  # model without verdict dims: holding still means it judges the view clear
+        points = None
+        if args.target == "sam2":
+            conn.send({"cmd": "find_start", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": query,
+                       "robot_points": robot_points_head(head_b)})
+            reply = conn.recv()
+            pose9, points = reply["pose9"], reply["points"]
+            if query not in tracked:
+                tracked.append(query)
+        else:
+            conn.send({"cmd": "locate9", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": query})
+            pose9 = conn.recv()["pose9"]
         true9 = truth_pose9(name, head_b)
-        find_log.append({"obj": query, "steps": t, "pos_err_mm": 1000 * float(np.linalg.norm(pose9[:3] - true9[:3])),
+        err = 1000 * float(np.linalg.norm(pose9[:3] - true9[:3]))
+        sk = "pick" if name.startswith("cube") else "place"
+        ep_track[sk].append(("find_start", err, "init"))
+        find_log.append({"obj": query, "steps": t, "pos_err_mm": err,
                          "yaw_err_deg": yaw_err_deg(pose9, true9, head_b, name.startswith("cube"))})
-        if args.verdict:  # truth: perception found the object within 3 cm
-            verdicts["find"].append((vd.result if vd.result is not None else "timeout", find_log[-1]["pos_err_mm"] < 30))
-        return pose9
+        verdicts["find"].append((vd.result if vd.result is not None else "timeout", err < 30))
+        return pose9, vd.result is not False, points
 
-    def go_home(home_link, head_b, steps=30):
+    def go_home(home_link, head_b, steps=30, on_step=None):
         """Scripted return of the gripper link to its episode-start (home) position over ~1.5 s."""
         pos, quat = math_utils.subtract_frame_transforms(
             robot.data.root_pos_w.torch, robot.data.root_quat_w.torch,
@@ -283,6 +315,8 @@ with sim_app.launch(env_cfg, args):
         for k in range(steps + 10):
             a = min((k + 1) / steps, 1.0)
             env.step(torch.cat([pos + (home_link[0] - pos) * a, home_link[1], grip], -1))
+            if on_step is not None and (k + 1) % args.sam2_every == 0:
+                on_step(head_b)
 
     PUSH_TIME = 0.5  # [s] the cube slides over this long
 
@@ -340,31 +374,53 @@ with sim_app.launch(env_cfg, args):
         )
         ep_steps = 0
         rot6d = {}
+        find_failed = False
         if args.pipeline == "find":
             home_link = math_utils.subtract_frame_transforms(
                 robot.data.root_pos_w.torch, robot.data.root_quat_w.torch,
                 robot.data.body_pos_w.torch[:, gi], robot.data.body_quat_w.torch[:, gi])
-            pose_c = run_find(language.cube_ref(cube), f"cube_{cube}", head_b, ep, args.seed * 100000 + ep * 10 + 7)
-            pose_p = run_find(language.plate_ref(plate), f"plate_{plate}", head_b, ep, args.seed * 100000 + ep * 10 + 8)
-            rot6d = {"pick": pose_c[3:], "place": pose_p[3:]}
-            if args.target != "sam2":
-                perceived = {"pick": pose_c[:3], "place": pose_p[:3]}
+            tracked.clear()
+            if args.target == "sam2":
+                conn.send({"cmd": "sam2_reset"})
+                conn.recv()
+            poses = {}
+            for i_obj, (sk, query, name) in enumerate((("pick", language.cube_ref(cube), f"cube_{cube}"),
+                                                      ("place", language.plate_ref(plate), f"plate_{plate}"))):
+                for attempt in range(1 + args.find_retries):
+                    pose, ok, _ = run_find(query, name, head_b, ep, args.seed * 100000 + ep * 10 + 7 + i_obj + 2 * attempt)
+                    outcome[f"find_{sk}_attempts"] = attempt + 1
+                    if ok:
+                        break
+                    go_home(home_link, head_b, on_step=bg_track)  # retry from home
+                poses[sk] = pose
+                if not ok:
+                    find_failed = True
+                    outcome["find_failed"] = query
+                    break
+            if not find_failed:
+                rot6d = {sk: v[3:] for sk, v in poses.items()}
+                if args.target != "sam2":
+                    perceived = {sk: v[:3] for sk, v in poses.items()}
         elif args.target_dim == 9:
             truth = {"pick": truth_pose9(f"cube_{cube}", head_b), "place": truth_pose9(f"plate_{plate}", head_b)}
             if args.fold_cube_yaw:
                 truth["pick"] = fold_cube_yaw(truth["pick"], head_b)
             rot6d = {sk: v[3:] for sk, v in truth.items()}  # direct mode: rotation from the simulator
-        if args.target == "sam2":
-            perceived = sam2_targets("sam2_start", cube, plate, head_b)  # from the clear view after find
-        if args.pipeline == "find":
-            go_home(home_link, head_b)
+        if args.target == "sam2" and args.pipeline == "direct":
+            perceived = sam2_targets("sam2_start", cube, plate, head_b)  # both objects from the home view
+        if args.pipeline == "find" and not find_failed:
+            go_home(home_link, head_b, on_step=bg_track)  # both trackers keep running
+            if args.target == "sam2":
+                perceived = sam2_targets("sam2_update", cube, plate, head_b)
         rng = np.random.default_rng(args.seed * 1000 + ep)
-        place_init = [e for e in ep_track["place"] if e[0] == "sam2_start"]
+        place_init = [e for e in ep_track["place"] if e[0] in ("sam2_start", "find_start")]
         outcome["place_init_err"] = place_init[-1][1] if place_init else None
         push_at = rng.uniform(0.3, 1.0)  # [s] into the pick skill
         outcome["push_mm"] = None
         push = {"vel": None, "steps_left": 0, "start": None}
         done = False
+        if find_failed:
+            steps = []  # find() failed after all retries: stop and hold, report to the orchestrator
         for skill_i, (skill, text) in enumerate(steps):
             conn.send({"cmd": "reset", "seed": args.seed * 100000 + ep * 10 + skill_i, "skill": skill})
             conn.recv()
@@ -507,6 +563,11 @@ with sim_app.launch(env_cfg, args):
                 close_txt += (f" | plate target at start {outcome['place_init_err']:.0f}mm, max during tracking "
                               f"{max([e[1] for e in upd], default=0):.0f}mm ({len(upd)} updates)")
             close_txt += f" | PLACE FAIL: {cause}"
+        if outcome.get("find_failed"):
+            close_txt += f" | FIND FAILED: {outcome['find_failed']}"
+        retries = [outcome.get(f"find_{sk}_attempts", 1) - 1 for sk in ("pick", "place")]
+        if any(retries):
+            close_txt += f" | find retries cube={retries[0]} plate={retries[1]}"
         if outcome.get("place_geom"):
             close_txt += " | cube-plate dxy={:.0f}mm dz={:.0f}mm opening={:.2f}".format(*outcome["place_geom"])
         print(f"[eval] {ep:3d} '{outcome['goal']}': pick={'ok' if outcome['pick'] else 'FAIL'} "
@@ -527,6 +588,10 @@ with sim_app.launch(env_cfg, args):
             print(f"[eval] find({kind}): pose position error median {np.median(pe):.0f} mm, >30 mm in {(pe > 30).sum()}/{len(pe)}; "
                   f"yaw error median {np.median(ye):.1f} deg; mean duration {np.mean([f['steps'] for f in fl]) * env.step_dt:.1f} s")
         print(f"[eval] skill swap time: median {np.median(swap):.1f} ms")
+    if args.pipeline == "find":
+        n_retry = sum(r.get("find_pick_attempts", 1) + r.get("find_place_attempts", 1) - 2 for r in results)
+        print(f"[eval] find: {sum(bool(r.get('find_failed')) for r in results)}/{n} episodes stopped (find failed after "
+              f"{args.find_retries} retries); {n_retry} retries in total")
     causes = [r["place_cause"] for r in results if r.get("place_cause")]
     if causes:
         from collections import Counter

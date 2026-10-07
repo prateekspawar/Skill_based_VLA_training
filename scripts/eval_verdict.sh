@@ -40,6 +40,7 @@ for r in ${RUNS:-direct_still direct_push verdict_still verdict_push find_verdic
     verdict_first_push) run verdict_first_push --push --verdict --verdict_from first ;;
     find_verdict_still) run find_verdict_still --pipeline find --verdict ;;
     find_verdict_first_still) run find_verdict_first_still --pipeline find --verdict --verdict_from first ;;
+    find_verdict_first_push) run find_verdict_first_push --pipeline find --push --verdict --verdict_from first ;;
   esac
 done
 kill $server; wait $server 2>/dev/null
