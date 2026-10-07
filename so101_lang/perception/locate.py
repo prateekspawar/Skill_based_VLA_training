@@ -141,6 +141,30 @@ def rot6d_from_yaw(yaw_base: float, calib: dict) -> np.ndarray:
     return np.concatenate([r_head[:, 0], r_head[:, 1]]).astype(np.float32)
 
 
+@torch.no_grad()
+def verify_name(locator: "TargetLocator", rgb: np.ndarray, query: str) -> tuple[bool, float]:
+    """Does the requested name win at the detected box against every other name of the same kind?
+
+    The box that best matches ``query`` is scored against all registry names of that object kind
+    ("red cube" vs green / blue / yellow cube). Returns (query wins, logit margin over the best other name).
+    Measured on find() end views: present cubes win 98 %, absent cubes 4 %. With the current pale plate
+    colours it does not separate plates (~53 %).
+    """
+    from so101_lang import language
+
+    kind = query.split()[-1]
+    refs = language.OBJECT_REFS if kind == "cube" else language.TARGET_REFS if kind == "plate" else [query]
+    if query not in refs or len(refs) < 2:
+        return True, float("inf")
+    inputs = locator.processor(text=[[detector_prompt(r) for r in refs]], images=rgb, return_tensors="pt").to(locator.device)
+    logits = locator.model(**inputs).logits[0]  # (boxes, names)
+    qi = refs.index(query)
+    b = int(torch.argmax(logits[:, qi]))
+    others = torch.cat([logits[b, :qi], logits[b, qi + 1 :]])
+    margin = float(logits[b, qi] - others.max())
+    return margin > 0, margin
+
+
 def locate9(locator: "TargetLocator", left: np.ndarray, right: np.ndarray, query: str) -> tuple[np.ndarray, dict]:
     """9-D pose (head-frame position + 6-D rotation) of a named object; the output of the find() skill."""
     point, info = locator.locate(left, right, query)

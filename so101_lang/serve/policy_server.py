@@ -165,12 +165,13 @@ def main():
                             conn.send({"ok": True})
                             continue
                         if msg["cmd"] == "find_start":  # end of find(query): 9-D pose + start tracking it from this view
-                            from so101_lang.perception.locate import locate9
+                            from so101_lang.perception.locate import locate9, verify_name
 
                             pose, linfo = locate9(locator, msg["left"], msg["right"], msg["query"])
+                            name_ok, margin = verify_name(locator, msg["left"], msg["query"])
                             points, info = sam2.add(msg["left"], msg["right"], msg["query"], robot_points)
-                            conn.send({"pose9": pose, "score": linfo["score"], "points": points, "info": info,
-                                       "t_locate": time.time() - t0})
+                            conn.send({"pose9": pose, "score": linfo["score"], "name_ok": name_ok, "name_margin": margin,
+                                       "points": points, "info": info, "t_locate": time.time() - t0})
                             continue
                         if msg["cmd"] == "sam2_start":
                             points, info = sam2.start(msg["left"], msg["right"], msg["queries"], robot_points)

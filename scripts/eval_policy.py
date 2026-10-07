@@ -303,12 +303,12 @@ with sim_app.launch(env_cfg, args):
             if vd.result is None and len(reply["actions"][0]) <= 10 and t >= 10 \
                     and np.linalg.norm(recent - recent.mean(0), axis=1).max() < 0.004:
                 break  # model without verdict dims: holding still means it judges the view clear
-        points = None
+        points, name_ok = None, None
         if args.target == "sam2":
             conn.send({"cmd": "find_start", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": query,
                        "robot_points": robot_points_head(head_b)})
             reply = conn.recv()
-            pose9, points = reply["pose9"], reply["points"]
+            pose9, points, name_ok = reply["pose9"], reply["points"], reply.get("name_ok")
             if query not in tracked:
                 tracked.append(query)
         else:
@@ -321,7 +321,11 @@ with sim_app.launch(env_cfg, args):
         find_log.append({"obj": query, "steps": t, "pos_err_mm": err,
                          "yaw_err_deg": yaw_err_deg(pose9, true9, head_b, name.startswith("cube"))})
         verdicts["find"].append((vd.result if vd.result is not None else "timeout", err < 30))
-        return pose9, vd.result is not False, points
+        # Accept when either the find model or the detector's name check says the object is there; retry only
+        # when both say it is not (each alone has false "not found" calls).
+        ok = vd.result is not False or bool(name_ok)
+        find_log[-1].update(model=vd.result, name_ok=name_ok, accepted=ok)
+        return pose9, ok, points
 
     def go_home(home_link, head_b, steps=30, on_step=None):
         """Scripted return of the gripper link to its episode-start (home) position over ~1.5 s."""
@@ -620,6 +624,14 @@ with sim_app.launch(env_cfg, args):
             print(f"[eval] find({kind}): pose position error median {np.median(pe):.0f} mm, >30 mm in {(pe > 30).sum()}/{len(pe)}; "
                   f"yaw error median {np.median(ye):.1f} deg; mean duration {np.mean([f['steps'] for f in fl]) * env.step_dt:.1f} s")
         print(f"[eval] skill swap time: median {np.median(swap):.1f} ms")
+    if find_log and "accepted" in find_log[0]:
+        fl = [f for f in find_log if "accepted" in f]
+        good = [f["pos_err_mm"] < 30 for f in fl]
+        acc = [f["accepted"] for f in fl]
+        print(f"[eval] find acceptance: {sum(acc)}/{len(fl)} accepted; accepted but wrong (>30 mm) "
+              f"{sum(a and not g for a, g in zip(acc, good))}, rejected but right {sum(g and not a for a, g in zip(acc, good))}; "
+              f"model said not-found {sum(f['model'] is False for f in fl)}, name check failed "
+              f"{sum(f['name_ok'] is False for f in fl)}")
     if args.pipeline == "find":
         n_retry = sum(r.get("find_pick_attempts", 1) + r.get("find_place_attempts", 1) - 2 for r in results)
         print(f"[eval] find: {sum(bool(r.get('find_failed')) for r in results)}/{n} episodes stopped (find failed after "

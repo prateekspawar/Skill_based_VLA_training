@@ -25,7 +25,7 @@ grep "\[skills\]" $OUT/server.log | sed "s/^/[eval-verdict] /"
 run() {
   local name=$1; shift
   log "running $name"
-  OMNI_KIT_ACCEPT_EULA=YES ~/isaacsim/bin/python scripts/eval_policy.py --episodes 50 --step_timeout 8 --seed 0 \
+  OMNI_KIT_ACCEPT_EULA=YES ~/isaacsim/bin/python scripts/eval_policy.py --episodes ${EPISODES:-50} --step_timeout 8 --seed 0 \
     --target sam2 --target_dim 9 ${EVAL_EXTRA:-} "$@" --video_out $OUT/$name.mp4 > $OUT/$name.log 2>&1
   grep -E "\[eval\] (pick success|pushes|verdict|find\(|skill swap)" $OUT/$name.log | sed "s/^/[eval-verdict] $name: /"
 }
