@@ -106,11 +106,20 @@ with sim_app.launch(env_cfg, args):
         def update(self, a, first=True):
             if not (args.verdict or self.always) or len(a) <= 10 or (args.verdict_from == "first" and not first):
                 return False
-            self.run = self.run + 1 if float(a[10]) > 0.5 else 0
-            # executed: 2 consecutive actions; first: one query (queries are exec_steps apart, longer than the
-            # 5-frame done label, so two consecutive done readings would almost never happen)
-            if self.run >= (1 if args.verdict_from == "first" else 2):
-                self.result = float(a[11]) > 0.5
+            done, ok = float(a[10]) > 0.5, float(a[11]) > 0.5
+            if args.verdict_from == "first":
+                # A pass is accepted at once; a fail needs two consecutive readings (one query apart): a real
+                # failure is followed by holding still, so the model keeps reporting it, while a single spurious
+                # "fail" mid-approach would otherwise end the skill.
+                self.run = self.run + 1 if done and not ok else 0
+                if done and ok:
+                    self.result = True
+                elif self.run >= 2:
+                    self.result = False
+            else:  # executed: 2 consecutive done actions
+                self.run = self.run + 1 if done else 0
+                if self.run >= 2:
+                    self.result = ok
             return self.result is not None
 
     def state_now(head_b):
@@ -249,6 +258,8 @@ with sim_app.launch(env_cfg, args):
 
     tracked = []  # objects whose SAM2 tracker is running (find pipeline)
 
+    bg_ctx = {}
+
     def bg_track(head_b):
         """Advance every running tracker by one frame (objects keep tracking while the arm does something else)."""
         if args.target != "sam2" or not tracked:
@@ -258,6 +269,12 @@ with sim_app.launch(env_cfg, args):
         reply = conn.recv()
         for q, st in reply["info"].items():
             track_status[st["status"]] = track_status.get(st["status"], 0) + 1
+        if bg_ctx:
+            cq = language.cube_ref(bg_ctx["cube"])
+            if cq in reply["points"]:
+                ep_track["pick"].append(("bg", 1000 * float(np.linalg.norm(
+                    reply["points"][cq] - oracle_target("pick", bg_ctx["cube"], bg_ctx["plate"], head_b))),
+                    reply["info"].get(cq, {}).get("status")))
         return reply["points"]
 
     def run_find(query, name, head_b, ep, seed):
@@ -380,6 +397,7 @@ with sim_app.launch(env_cfg, args):
                 robot.data.root_pos_w.torch, robot.data.root_quat_w.torch,
                 robot.data.body_pos_w.torch[:, gi], robot.data.body_quat_w.torch[:, gi])
             tracked.clear()
+            bg_ctx.update(cube=cube, plate=plate)
             if args.target == "sam2":
                 conn.send({"cmd": "sam2_reset"})
                 conn.recv()
@@ -412,6 +430,7 @@ with sim_app.launch(env_cfg, args):
             go_home(home_link, head_b, on_step=bg_track)  # both trackers keep running
             if args.target == "sam2":
                 perceived = sam2_targets("sam2_update", cube, plate, head_b)
+                outcome["pick_target_start_err"] = 1000 * float(np.linalg.norm(perceived["pick"] - oracle_target("pick", cube, plate, head_b)))
         rng = np.random.default_rng(args.seed * 1000 + ep)
         place_init = [e for e in ep_track["place"] if e[0] in ("sam2_start", "find_start")]
         outcome["place_init_err"] = place_init[-1][1] if place_init else None
@@ -504,6 +523,9 @@ with sim_app.launch(env_cfg, args):
                         done = True
                         break
                     if vd.update(a, k == 0):
+                        tcp, cubes = tcp_and_cubes_b()
+                        outcome[f"{skill}_verdict_at"] = (t, 1000 * float(torch.linalg.norm(tcp - cubes[cube])),
+                                                          float(state_now(head_b)[0, 9]))
                         break
                     if skill == "pick" and outcome["pick"] and not args.verdict:
                         break
@@ -563,6 +585,16 @@ with sim_app.launch(env_cfg, args):
                 close_txt += (f" | plate target at start {outcome['place_init_err']:.0f}mm, max during tracking "
                               f"{max([e[1] for e in upd], default=0):.0f}mm ({len(upd)} updates)")
             close_txt += f" | PLACE FAIL: {cause}"
+        if not outcome["pick"] and outcome.get("pick_target_start_err") is not None:
+            fs = [e[1] for e in ep_track["pick"] if e[0] == "find_start"]
+            bg = [e for e in ep_track["pick"] if e[0] == "sam2_update"]
+            bgm = max([e[1] for e in ep_track["pick"] if e[0] == "bg"], default=0)
+            close_txt += (f" | cube target: at find {fs[-1] if fs else float('nan'):.0f}mm, max during plate find/home "
+                          f"{bgm:.0f}mm, at pick start "
+                          f"{outcome['pick_target_start_err']:.0f}mm")
+        if not outcome["pick"] and outcome.get("pick_verdict_at"):
+            t_, d_, o_ = outcome["pick_verdict_at"]
+            close_txt += f" | pick verdict at step {t_}: tcp-cube {d_:.0f}mm, gripper opening {o_:.2f}"
         if outcome.get("find_failed"):
             close_txt += f" | FIND FAILED: {outcome['find_failed']}"
         retries = [outcome.get(f"find_{sk}_attempts", 1) - 1 for sk in ("pick", "place")]
