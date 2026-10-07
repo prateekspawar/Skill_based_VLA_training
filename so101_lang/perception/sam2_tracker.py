@@ -59,6 +59,8 @@ class Sam2PointTracker:
         settle_n: int = 3,
         area_band: tuple[float, float] = (0.7, 1.4),
         max_robot_frac: float = 0.15,
+        follow_area_band: tuple[float, float] = (0.4, 2.0),
+        follow_max_robot_frac: float = 0.5,
     ):
         from transformers import Sam2VideoModel, Sam2VideoProcessor
 
@@ -70,6 +72,8 @@ class Sam2PointTracker:
         self.move_thr, self.move_confirm = move_thr, move_confirm
         self.settle_tol, self.settle_n = settle_tol, settle_n
         self.area_band, self.max_robot_frac = area_band, max_robot_frac
+        # Looser trust while following a confirmed move: the gripper often overlaps a cube that is still sliding.
+        self.follow_area_band, self.follow_max_robot_frac = follow_area_band, follow_max_robot_frac
         self.state, self.anchor, self.recent, self.departs = {}, {}, {}, {}
         if shared is not None:  # reuse another tracker's weights (one SAM2 model, several sessions)
             self.processor, self.model = shared.processor, shared.model
@@ -186,11 +190,12 @@ class Sam2PointTracker:
             self.points[q], self.area0[q], self.ref[q] = p, area, p
             self.state[q], self.anchor[q], self.recent[q], self.departs[q] = "locked", self.base[q], [], []
             return {"status": "init", "mask_px": area, "px_used": n}
-        lo, hi = self.area_band
+        following = self.state[q] == "following"
+        lo, hi = self.follow_area_band if following else self.area_band
         a0 = self.area0[q]
         if not lo * a0 <= area <= hi * a0:
             return {"status": "untrusted_area", "mask_px": area, "px_used": n}
-        if self._robot_frac > self.max_robot_frac:
+        if self._robot_frac > (self.follow_max_robot_frac if following else self.max_robot_frac):
             return {"status": "untrusted_robot", "mask_px": area, "px_used": n}
         self.points[q] = p
         disp = p - self.ref[q]
