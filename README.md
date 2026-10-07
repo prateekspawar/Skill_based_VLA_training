@@ -222,6 +222,23 @@ full 20 %.
 - find acceptance: 300/314 accepted, 19–32 accepted with a pose >30 mm off, 12–16 correct finds rejected.
   The name check fails on plates (pale colours) about 90 times per run; plate colours will be changed.
 
+**Tracker comparison, find pipeline (150 seeded episodes each; 2026-10-07).** Pick starts with the gripper closed
+(as in training). Robot keypoints for the self-filter come from FK with an 8 mm / 1° hand-eye calibration error.
+No simulator ground truth reaches the tracker.
+
+| Tracker | Stationary pick / full | target err at close | Push pick / full | err right after push |
+|---|---|---|---|---|
+| displacement deadband 2.5 cm (old) | 73 / 48 % | 2 mm | 29 / 20 % | 21 mm |
+| deadband 1 cm, freeze 3 cm | 72 / 43 % | 15 mm | **43 / 25 %** | 14 mm |
+| **state-based** (locked / following on trusted measurements) | **79 / 52 %** | 2 mm | 35 / 23 % | 17 mm |
+
+The state tracker publishes the clear-view detection while locked. It follows only after two consistent
+trusted measurements more than 1.5 cm away, and locks again once still. A measurement is trusted when the mask
+is 0.7–1.4× its find-view size and <15 % of its pixels lie on the robot. While the cube is still sliding it
+rejects too many measurements (mask size), so it follows pushes more slowly than the 1 cm deadband.
+Stationary pick misses are now dominated by the cube-angle estimate: target yaw error median 18° in misses vs
+2° in successful picks.
+
 Findings:
 1. **Find works as intended.** Wrong-target pick failures fall from 13 to 5 per 50 episodes. Find pose error is
    1 mm (cube) / 7 mm (plate) median. Pick reaches 76 %, the best so far, even though the skills end on the model's
