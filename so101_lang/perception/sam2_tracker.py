@@ -52,6 +52,13 @@ class Sam2PointTracker:
         confirm_radius: float = 0.015,
         deadband: float = 0.025,
         shared: "Sam2PointTracker | None" = None,
+        mode: str = "state",
+        move_thr: float = 0.015,
+        move_confirm: int = 2,
+        settle_tol: float = 0.005,
+        settle_n: int = 3,
+        area_band: tuple[float, float] = (0.7, 1.4),
+        max_robot_frac: float = 0.15,
     ):
         from transformers import Sam2VideoModel, Sam2VideoProcessor
 
@@ -59,6 +66,11 @@ class Sam2PointTracker:
         self.min_mask_px, self.self_filter_radius = min_mask_px, self_filter_radius
         self.max_area_growth, self.max_jump, self.confirm_radius = max_area_growth, max_jump, confirm_radius
         self.deadband = deadband
+        self.mode = mode  # "state": locked / following state machine; "deadband": the earlier displacement deadband
+        self.move_thr, self.move_confirm = move_thr, move_confirm
+        self.settle_tol, self.settle_n = settle_tol, settle_n
+        self.area_band, self.max_robot_frac = area_band, max_robot_frac
+        self.state, self.anchor, self.recent, self.departs = {}, {}, {}, {}
         if shared is not None:  # reuse another tracker's weights (one SAM2 model, several sessions)
             self.processor, self.model = shared.processor, shared.model
         else:
@@ -71,6 +83,10 @@ class Sam2PointTracker:
     def published(self) -> dict:
         """Target points to use: the initial detection, shifted by the tracked displacement beyond the deadband."""
         out = {}
+        if self.mode == "state":
+            for q in self.queries:
+                out[q] = self.anchor.get(q, self.base[q]).astype(np.float32)
+            return out
         for q in self.queries:
             disp = self.points[q] - self.ref[q] if q in self.ref else np.zeros(3, np.float32)
             out[q] = (self.base[q] + disp if np.linalg.norm(disp) > self.deadband else self.base[q]).astype(np.float32)
@@ -88,10 +104,13 @@ class Sam2PointTracker:
         central[int(max(cy - hh, 0)) : int(cy + hh) + 1, int(max(cx - hw, 0)) : int(cx + hw) + 1] = True
         if (mask & central).sum() >= self.min_mask_px:
             mask = mask & central
-        return self.locator.point_from_mask(
+        p, n = self.locator.point_from_mask(
             depth, mask, query, exclude_points=robot_points, exclude_radius=self.self_filter_radius,
             min_px=self.min_mask_px,
         )
+        n_all = int((mask & np.isfinite(depth)).sum())
+        self._robot_frac = 1.0 - n / max(n_all, 1)  # share of the object's pixels lying on the robot
+        return p, n
 
     @torch.no_grad()
     def _step(self, left, right, robot_points, prompt_boxes=None, frozen=(), depth=None):
@@ -119,7 +138,8 @@ class Sam2PointTracker:
             if not visible[i] or area < self.min_mask_px:
                 info[query] = {"status": "occluded", "mask_px": area}
                 continue
-            if prompt_boxes is None and query in self.area0 and area > self.max_area_growth * self.area0[query]:
+            if (self.mode != "state" and prompt_boxes is None and query in self.area0
+                    and area > self.max_area_growth * self.area0[query]):
                 info[query] = {"status": "rejected_area", "mask_px": area}
                 continue
             try:
@@ -129,7 +149,12 @@ class Sam2PointTracker:
                 continue
             if prompt_boxes is not None:  # first frame: initialize
                 self.points[query], self.area0[query], self.ref[query] = p, area, p
+                self.state[query], self.anchor[query] = "locked", self.base[query]
+                self.recent[query], self.departs[query] = [], []
                 info[query] = {"status": "init", "mask_px": area, "px_used": n}
+                continue
+            if self.mode == "state":
+                info[query] = self._state_update(query, p, area, n)
                 continue
             if np.linalg.norm(p - self.points[query]) > self.max_jump:
                 cand = self.pending.get(query)
@@ -146,9 +171,61 @@ class Sam2PointTracker:
             info[query] = {"status": "tracked", "mask_px": area, "px_used": n}
         return info
 
+    def _state_update(self, q, p, area, n):
+        """Locked / following state machine on *trusted* measurements (images, depth and robot FK only).
+
+        A measurement is trusted when the mask is about its initial size (not partly hidden, not merged) and
+        few of its pixels lie on the robot. Locked: the published point stays at the (clear-view) detection;
+        it switches to following only when ``move_confirm`` consecutive trusted measurements are more than
+        ``move_thr`` from the reference in a consistent place (a real move by anything). Following: the
+        published point = anchor + measured displacement on every trusted update; when ``settle_n`` trusted
+        measurements agree within ``settle_tol`` the object has stopped and it locks again there.
+        Untrusted measurements never move the published point.
+        """
+        if q not in self.area0:  # the first mask was unusable (hidden at start): initialise on this measurement
+            self.points[q], self.area0[q], self.ref[q] = p, area, p
+            self.state[q], self.anchor[q], self.recent[q], self.departs[q] = "locked", self.base[q], [], []
+            return {"status": "init", "mask_px": area, "px_used": n}
+        lo, hi = self.area_band
+        a0 = self.area0[q]
+        if not lo * a0 <= area <= hi * a0:
+            return {"status": "untrusted_area", "mask_px": area, "px_used": n}
+        if self._robot_frac > self.max_robot_frac:
+            return {"status": "untrusted_robot", "mask_px": area, "px_used": n}
+        self.points[q] = p
+        disp = p - self.ref[q]
+        if self.state[q] == "locked":
+            if np.linalg.norm(disp) > self.move_thr:
+                d = self.departs[q]
+                if d and np.linalg.norm(p - d[-1]) > 2 * self.move_thr:
+                    d.clear()  # inconsistent with the previous departure: start counting again
+                d.append(p)
+                if len(d) >= self.move_confirm:
+                    self.state[q] = "following"
+                    self.anchor[q] = self.anchor[q] + disp
+                    self.ref[q] = p
+                    self.recent[q] = [p]
+                    d.clear()
+                    return {"status": "moved", "mask_px": area, "px_used": n}
+                return {"status": "departing", "mask_px": area, "px_used": n}
+            self.departs[q].clear()
+            return {"status": "locked", "mask_px": area, "px_used": n}
+        # following
+        self.anchor[q] = self.anchor[q] + disp
+        self.ref[q] = p
+        r = self.recent[q]
+        r.append(p)
+        del r[: -self.settle_n]
+        if len(r) == self.settle_n and max(np.linalg.norm(a - b) for a in r for b in r) < self.settle_tol:
+            self.state[q] = "locked"
+            r.clear()
+            return {"status": "settled", "mask_px": area, "px_used": n}
+        return {"status": "following", "mask_px": area, "px_used": n}
+
     def start(self, left, right, queries, robot_points=None):
         self.queries = list(queries)
         self.points, self.area0, self.pending, self.base, self.ref = {}, {}, {}, {}, {}
+        self.state, self.anchor, self.recent, self.departs = {}, {}, {}, {}
         self.session = self.processor.init_video_session(inference_device=self.device, dtype=torch.float32)
         boxes, scores = [], {}
         for q in self.queries:

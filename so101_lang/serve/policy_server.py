@@ -160,8 +160,10 @@ def main():
                             from so101_lang.perception.sam2_tracker import Sam2MultiTracker
 
                             # SAM2_DEADBAND [m]: published target moves only once the tracked point moved this far
-                            sam2 = Sam2MultiTracker(locator, deadband=float(os.environ.get("SAM2_DEADBAND", 0.025)))
-                            print(f"[server] SAM2 deadband {sam2.kwargs['deadband'] * 1000:.0f} mm", flush=True)
+                            # SAM2_MODE: "state" (locked / following on trusted measurements, default) or "deadband"
+                            sam2 = Sam2MultiTracker(locator, deadband=float(os.environ.get("SAM2_DEADBAND", 0.025)),
+                                                    mode=os.environ.get("SAM2_MODE", "state"))
+                            print(f"[server] SAM2 tracker mode {sam2.kwargs['mode']}", flush=True)
                         robot_points = msg.get("robot_points")  # robot keypoints (head frame) for the self-filter
                         if msg["cmd"] == "sam2_reset":
                             sam2.reset()

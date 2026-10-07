@@ -41,6 +41,10 @@ parser.add_argument("--freeze_radius", type=float, default=0.05,
 parser.add_argument("--home_grip", choices=["keep", "closed"], default="closed",
                     help="Gripper during the scripted return home after find(): closed = the pick start state seen in "
                          "training; keep = whatever opening find() left.")
+parser.add_argument("--kp_calib_mm", type=float, default=8.0,
+                    help="Per-episode hand-eye calibration error applied to the robot keypoints the tracker gets "
+                         "(translation std per axis [mm]); keypoints = forward kinematics of the joint angles.")
+parser.add_argument("--kp_calib_deg", type=float, default=1.0, help="... and rotation std [deg].")
 parser.add_argument("--sam2_every", type=int, default=3, help="Control steps between SAM2 updates during pick.")
 parser.add_argument("--verdict", action="store_true",
                     help="12-D action models: a skill ends when the model reports done ([done, success] > 0.5 for 2 "
@@ -212,7 +216,10 @@ with sim_app.launch(env_cfg, args):
             pts += [a + (b - a) * k / n for k in range(n + 1)]
         p_b = torch.stack(pts)
         base_in_head = frames.invert_transform(head_b)[0]
-        return (p_b @ base_in_head[:3, :3].T + base_in_head[:3, 3]).cpu().numpy()
+        p_h = (p_b @ base_in_head[:3, :3].T + base_in_head[:3, 3]).cpu().numpy()
+        if kp_calib:  # real FK keypoints come through an imperfect hand-eye calibration
+            p_h = p_h @ kp_calib["R"].T + kp_calib["t"]
+        return p_h
 
     def sam2_targets(cmd, cube, plate, head_b, frozen=()):
         """Start or update SAM2 tracking of the episode's pick cube and place plate; returns head-frame points."""
@@ -380,11 +387,19 @@ with sim_app.launch(env_cfg, args):
     results, frames_out, latencies, perception_err = [], [], [], []
     find_log, swap = [], []
     track_err, track_status = [], {}
+    kp_calib = {}
     ep_track = {"pick": [], "place": []}
     torch.inference_mode().__enter__()
     for ep in range(args.episodes):
         env.reset()
         ep_track["pick"].clear(); ep_track["place"].clear()
+        if args.kp_calib_mm > 0 or args.kp_calib_deg > 0:
+            kr = np.random.default_rng(args.seed * 7919 + ep)
+            axis = kr.normal(size=3); axis /= np.linalg.norm(axis)
+            ang = np.deg2rad(kr.normal(0, args.kp_calib_deg))
+            K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+            kp_calib.update(R=np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * K @ K,
+                            t=kr.normal(0, args.kp_calib_mm / 1000, 3))
         head_b = head_in_base(env)
         # One hold step so the cameras show the new layout (first post-reset render is stale).
         env.step(adapter.ik_command(state_now(head_b), head_b))
