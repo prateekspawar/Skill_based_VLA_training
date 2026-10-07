@@ -73,7 +73,7 @@ Process layout (two Python environments that talk over a local socket):
 | `place` | `target`: white / pink plate | "place it on the {target}" |
 | `find` | `object`: any cube or plate | "find the {object}" |
 
-### Skill models and the pass/fail verdict (in training)
+### Skill models and the pass/fail verdict
 - One model per skill (pick, place, find) on a **shared frozen SmolVLA backbone**; the server swaps only the
   ~100 M trainable tensors (`serve/skills.py`, `policy_server --skills pick=... place=... find=...`).
 - State is 19-D: 10-D TCP + 9-D target pose (position + rot6d, head frame; find gets zeros). Yaw is not folded.
@@ -196,12 +196,50 @@ Key findings:
 5. Depth input to the VLA (colormap depth camera or native point-map tokens) gives no significant gain over the
    no-depth model once the target point is provided (see the depth comparison table). Depth stays in perception.
 
+### Skill models with pass/fail verdict (2026-10-07; 50 seeded episodes, SAM2 targets, 9-D target pose)
+Pick, place and find run as separate models on one shared frozen backbone (swap 0.8 ms). The final models are
+`pick9fm_15000` and `place9m_15000`: cube yaw folded by the cube's 90° symmetry, and failure-demo motion masked.
+Find is `find9s_15000`.
+
+| Run | Pick | Full pick+place | Verdict accuracy (pick / place / find) |
+|---|---|---|---|
+| D2 combined model (reference) stationary / push | 66 / 44 % | 46 / 32 % | – |
+| direct, skills end on simulator truth, stationary | 70 % | 38 % | – |
+| direct, push | 46 % | 30 % | – |
+| skills end on the model's verdict (current-frame read), stationary | 70 % | 42 % | 83 / 59 / – % |
+| same, push | 40 % | 18 % | 80 / 43 / – % |
+| **find → pick → place**, verdict-ended, stationary | **76 %** | **44 %** | 85 / 57 / 73 % |
+
+Findings:
+1. **Find works as intended.** Wrong-target pick failures fall from 13 to 5 per 50 episodes. Find pose error is
+   1 mm (cube) / 7 mm (plate) median. Pick reaches 76 %, the best so far, even though the skills end on the model's
+   own verdict.
+2. **Symmetric-object yaw must match perception.** A pick model trained on unfolded cube yaw drops from 64 % to
+   18 % when given the folded yaw that perception can measure. Targets are now folded by `language.YAW_SYMMETRY_DEG`
+   (cube 90°, plate 360°; an asymmetric object keeps its full yaw).
+3. **Failure demos must not teach their motion.** Unmasked, place succeeded after only 38 % of good picks
+   (D2: 70 %): the model imitated releases beside the plate and drops mid-carry. With the motion before failure
+   detection masked (`data/mask_failure_motion.py`, NaN entries ignored by the loss) it is 54 %. Place is still
+   the weakest skill.
+4. **Read the verdict from the current frame** (`--verdict_from first`). Later entries of a chunk are predictions
+   up to 0.5 s ahead.
+5. **Verdict errors are mostly false passes.**
+   - Pick passes 7–10 misses per 50 episodes and almost never fails a real pick.
+   - About half of place's false passes follow a false pick pass: place then runs with an empty gripper, a case
+     never seen in training. The others are real place failures, or success reported before release.
+   - Find wrongly reports "not found" for 19/100 objects it did find. All its training failures are
+     "object absent", so it never learnt partial views.
+
 ## 8. Not done yet / next steps
 - Wire in the LLM planner (Ollama qwen3-vl:8b, `skills_schema()` as the function list, validation, re-planning).
 - Full training run with the target point (current model is a 2,500-step fine-tune).
 - Better first detection (confidence / LLM verification).
-- Verdict skill models (training): eval with `--verdict`, direct and find pipelines, stationary and push; compare
-  with D2 combined (66/46 stationary, 44/32 push) and report verdict accuracy. Then wire the verdict into the planner.
+- Verdict quality:
+  - add place-with-empty-gripper failures and post-release hold frames (labelled success) to the place data;
+  - add "partly visible / occluded but present" find successes;
+  - more varied pick-failure demos (wrong-cube grasps, edge grasps) to cut false passes.
+- Place is the weakest skill (54 % after a good pick vs D2 70 %): more place data, or initialise place from D2.
+- Wire the verdicts into the planner: retry / re-find on failure.
 - ~~Train the VLA to follow moving targets~~ done in stage 1 (combined pick + place model). Separate per-skill models
   were considered and dropped: the combined model is the one carried forward. (Tooling remains:
   `hdf5_to_lerobot --skill`, `build_targets --skill`, `policy_server --checkpoint_place`, `run_stage_per_skill.sh`.)
