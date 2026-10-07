@@ -130,6 +130,28 @@ with sim_app.launch(env_cfg, args):
         ])
         return tcp[0], cubes
 
+    def plate_b(plate):
+        return math_utils.subtract_frame_transforms(
+            robot.data.root_pos_w.torch, robot.data.root_quat_w.torch, env.scene[f"plate_{plate}"].data.root_pos_w.torch
+        )[0][0]
+
+    def place_snapshot(cube, plate, head_b, sent):
+        """Geometry at the moment the place policy first commands the gripper open."""
+        tcp, cubes = tcp_and_cubes_b()
+        pl = plate_b(plate)
+        err = None if sent is None else 1000 * float(np.linalg.norm(np.asarray(sent)[:3] - oracle_target("place", cube, plate, head_b)))
+        near = None
+        if sent is not None:  # which scene object is the place target actually on?
+            cands = {f"cube_{i}": oracle_target("pick", i, plate, head_b) for i in range(language.NUM_CUBES)}
+            cands.update({f"plate_{j}": oracle_target("place", cube, j, head_b) for j in range(language.NUM_PLATES)})
+            cands["tcp"] = state_now(head_b)[0, :3].cpu().numpy()
+            k = min(cands, key=lambda n: np.linalg.norm(np.asarray(sent)[:3] - cands[n]))
+            held = " (held)" if k == f"cube_{cube}" else (" (target)" if k == f"plate_{plate}" else "")
+            near = f"{k}{held} {1000 * np.linalg.norm(np.asarray(sent)[:3] - cands[k]):.0f}mm"
+        return {"tcp_plate_dxy": 1000 * float(torch.linalg.norm(tcp[:2] - pl[:2])),
+                "tcp_plate_dz": 1000 * float(tcp[2] - pl[2]),
+                "cube_in_hand": float(torch.linalg.norm(cubes[cube] - tcp)) < 0.03, "target_err": err, "near": near}
+
     def oracle_target(skill, cube, plate, head_b):
         """Target point in the head frame: the cube's centre for pick, the plate's centre for place."""
         name = f"cube_{cube}" if skill == "pick" else f"plate_{plate}"
@@ -190,6 +212,7 @@ with sim_app.launch(env_cfg, args):
             out[sk] = reply["points"][q]
             if sk not in frozen:
                 track_err.append((sk, 1000 * float(np.linalg.norm(out[sk] - oracle_target(sk, cube, plate, head_b)))))
+                ep_track[sk].append((cmd, track_err[-1][1], reply["info"][q]["status"]))
             st = reply["info"][q]["status"]
             track_status[st] = track_status.get(st, 0) + 1
         return out
@@ -295,9 +318,11 @@ with sim_app.launch(env_cfg, args):
     results, frames_out, latencies, perception_err = [], [], [], []
     find_log, swap = [], []
     track_err, track_status = [], {}
+    ep_track = {"pick": [], "place": []}
     torch.inference_mode().__enter__()
     for ep in range(args.episodes):
         env.reset()
+        ep_track["pick"].clear(); ep_track["place"].clear()
         head_b = head_in_base(env)
         # One hold step so the cameras show the new layout (first post-reset render is stale).
         env.step(adapter.ik_command(state_now(head_b), head_b))
@@ -334,6 +359,8 @@ with sim_app.launch(env_cfg, args):
         if args.pipeline == "find":
             go_home(home_link, head_b)
         rng = np.random.default_rng(args.seed * 1000 + ep)
+        place_init = [e for e in ep_track["place"] if e[0] == "sam2_start"]
+        outcome["place_init_err"] = place_init[-1][1] if place_init else None
         push_at = rng.uniform(0.3, 1.0)  # [s] into the pick skill
         outcome["push_mm"] = None
         push = {"vel": None, "steps_left": 0, "start": None}
@@ -370,6 +397,8 @@ with sim_app.launch(env_cfg, args):
                 reply = conn.recv()
                 latencies.append(reply["t_total"])
                 for k, a in enumerate(torch.as_tensor(reply["actions"][: args.exec_steps], device=env.device)):
+                    if skill == "place" and outcome.get("release") is None and float(a[9]) > 0.5:
+                        outcome["release"] = place_snapshot(cube, plate, head_b, target)
                     if skill == "pick" and outcome["close"] is None and float(a[9]) < 0.5:
                         # First closing command: where is the TCP relative to the target / nearest cube?
                         tcp, cubes = tcp_and_cubes_b()
@@ -408,6 +437,9 @@ with sim_app.launch(env_cfg, args):
                     if ep == args.video_episode:
                         frames_out.append(rgb("left_cam"))
                     lifted = float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) > rest_z + 0.03
+                    if (skill == "place" and outcome.get("release") is None and outcome.get("dropped") is None
+                            and float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) < rest_z + 0.01):
+                        outcome["dropped"] = t  # the cube is back on the table before any release command
                     if skill == "pick" and lifted:
                         outcome["pick"] = True
                     if term[0] or trunc[0]:
@@ -451,6 +483,30 @@ with sim_app.launch(env_cfg, args):
         if args.verdict:
             close_txt += " | verdicts " + " ".join(f"{sk}={outcome[f'{sk}_verdict'][0]}/{outcome[f'{sk}_verdict'][1]}"
                                                      for sk in ("pick", "place") if f"{sk}_verdict" in outcome)
+        if outcome["pick"] and not outcome["place"]:
+            r = outcome.get("release")
+            if outcome.get("dropped") is not None:
+                cause = "dropped before release"
+            elif r is None:
+                cause = "never released"
+            elif r["target_err"] is not None and r["target_err"] > 30:
+                cause = "bad plate target"
+            elif r["tcp_plate_dxy"] > 35:
+                cause = "released off the plate (target ok)"
+            elif not r["cube_in_hand"]:
+                cause = "cube not in hand at release"
+            else:
+                cause = "released over the plate"
+            outcome["place_cause"] = cause
+            if r:
+                close_txt += (f" | release: tcp-plate dxy={r['tcp_plate_dxy']:.0f}mm dz={r['tcp_plate_dz']:.0f}mm "
+                              f"target err={r['target_err'] if r['target_err'] is None else round(r['target_err'])}mm "
+                              f"in hand={r['cube_in_hand']} near={r['near']}")
+            if outcome.get("place_init_err") is not None:
+                upd = [e for e in ep_track["place"] if e[0] == "sam2_update"]
+                close_txt += (f" | plate target at start {outcome['place_init_err']:.0f}mm, max during tracking "
+                              f"{max([e[1] for e in upd], default=0):.0f}mm ({len(upd)} updates)")
+            close_txt += f" | PLACE FAIL: {cause}"
         if outcome.get("place_geom"):
             close_txt += " | cube-plate dxy={:.0f}mm dz={:.0f}mm opening={:.2f}".format(*outcome["place_geom"])
         print(f"[eval] {ep:3d} '{outcome['goal']}': pick={'ok' if outcome['pick'] else 'FAIL'} "
@@ -471,6 +527,11 @@ with sim_app.launch(env_cfg, args):
             print(f"[eval] find({kind}): pose position error median {np.median(pe):.0f} mm, >30 mm in {(pe > 30).sum()}/{len(pe)}; "
                   f"yaw error median {np.median(ye):.1f} deg; mean duration {np.mean([f['steps'] for f in fl]) * env.step_dt:.1f} s")
         print(f"[eval] skill swap time: median {np.median(swap):.1f} ms")
+    causes = [r["place_cause"] for r in results if r.get("place_cause")]
+    if causes:
+        from collections import Counter
+        print(f"[eval] place failures after a successful pick: {len(causes)}/{sum(r['pick'] for r in results)}: "
+              + ", ".join(f"{c} {k}" for k, c in Counter(causes).most_common()))
     for sk, vs in verdicts.items():
         if vs:
             tp = sum(v is True and t for v, t in vs); tn = sum(v is False and not t for v, t in vs)
