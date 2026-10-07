@@ -36,6 +36,11 @@ parser.add_argument("--find_retries", type=int, default=2,
                     help="Retries of a find() whose model reports failure (each retry starts from home).")
 parser.add_argument("--target_dim", type=int, choices=[3, 9], default=3,
                     help="Target sent to the policy: 3 = position, 9 = position + 6-D rotation (19-D state models).")
+parser.add_argument("--freeze_radius", type=float, default=0.05,
+                    help="Pick target stops updating once the TCP is this close to it [m] (and when the gripper closes).")
+parser.add_argument("--home_grip", choices=["keep", "closed"], default="closed",
+                    help="Gripper during the scripted return home after find(): closed = the pick start state seen in "
+                         "training; keep = whatever opening find() left.")
 parser.add_argument("--sam2_every", type=int, default=3, help="Control steps between SAM2 updates during pick.")
 parser.add_argument("--verdict", action="store_true",
                     help="12-D action models: a skill ends when the model reports done ([done, success] > 0.5 for 2 "
@@ -333,6 +338,8 @@ with sim_app.launch(env_cfg, args):
             robot.data.root_pos_w.torch, robot.data.root_quat_w.torch,
             robot.data.body_pos_w.torch[:, gi], robot.data.body_quat_w.torch[:, gi])
         grip = 1.0 - adapter.opening_from_joint(robot.data.joint_pos.torch[:, 5]).unsqueeze(-1)
+        if args.home_grip == "closed":
+            grip = torch.ones_like(grip)  # closedness 1: the gripper state pick starts from in training
         for k in range(steps + 10):
             a = min((k + 1) / steps, 1.0)
             env.step(torch.cat([pos + (home_link[0] - pos) * a, home_link[1], grip], -1))
@@ -465,7 +472,7 @@ with sim_app.launch(env_cfg, args):
                     # Freeze a target once the gripper is close to it: the gripper / held cube then overlaps the
                     # object's mask, and an object about to be grasped or placed on cannot be re-targeted anyway.
                     tcp_h = state_now(head_b)[0, :3].cpu().numpy()
-                    frozen = tuple(sk for sk, radius in (("pick", 0.05), ("place", 0.06))
+                    frozen = tuple(sk for sk, radius in (("pick", args.freeze_radius), ("place", 0.06))
                                    if np.linalg.norm(tcp_h - perceived[sk]) < radius
                                    or (sk == "pick" and outcome["close"] is not None))
                     perceived = sam2_targets("sam2_update", cube, plate, head_b, frozen)
@@ -518,7 +525,7 @@ with sim_app.launch(env_cfg, args):
                             and t % args.sam2_every == 0):
                         # Feed SAM2 the motion between policy queries so masks follow moving objects.
                         tcp_h = state_now(head_b)[0, :3].cpu().numpy()
-                        frozen = ("pick",) if np.linalg.norm(tcp_h - perceived["pick"]) < 0.05 else ()
+                        frozen = ("pick",) if np.linalg.norm(tcp_h - perceived["pick"]) < args.freeze_radius else ()
                         perceived = sam2_targets("sam2_update", cube, plate, head_b, frozen + ("place",))
                     if ep == args.video_episode:
                         frames_out.append(rgb("left_cam"))

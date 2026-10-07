@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from multiprocessing.connection import Listener
 from pathlib import Path
@@ -158,7 +159,9 @@ def main():
                         if sam2 is None:
                             from so101_lang.perception.sam2_tracker import Sam2MultiTracker
 
-                            sam2 = Sam2MultiTracker(locator)
+                            # SAM2_DEADBAND [m]: published target moves only once the tracked point moved this far
+                            sam2 = Sam2MultiTracker(locator, deadband=float(os.environ.get("SAM2_DEADBAND", 0.025)))
+                            print(f"[server] SAM2 deadband {sam2.kwargs['deadband'] * 1000:.0f} mm", flush=True)
                         robot_points = msg.get("robot_points")  # robot keypoints (head frame) for the self-filter
                         if msg["cmd"] == "sam2_reset":
                             sam2.reset()
