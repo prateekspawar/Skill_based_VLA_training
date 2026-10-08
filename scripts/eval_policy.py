@@ -45,6 +45,9 @@ parser.add_argument("--kp_calib_mm", type=float, default=8.0,
                     help="Per-episode hand-eye calibration error applied to the robot keypoints the tracker gets "
                          "(translation std per axis [mm]); keypoints = forward kinematics of the joint angles.")
 parser.add_argument("--kp_calib_deg", type=float, default=1.0, help="... and rotation std [deg].")
+parser.add_argument("--find_accept", choices=["plausible", "either"], default="plausible",
+                    help="plausible: a find result is accepted only if the ranked detection's best match fits the "
+                         "request (else retry); either: accept if the find model or the name check says found.")
 parser.add_argument("--sam2_every", type=int, default=3, help="Control steps between SAM2 updates during pick.")
 parser.add_argument("--verdict", action="store_true",
                     help="12-D action models: a skill ends when the model reports done ([done, success] > 0.5 for 2 "
@@ -341,9 +344,13 @@ with sim_app.launch(env_cfg, args):
         find_log.append({"obj": query, "steps": t, "pos_err_mm": err,
                          "yaw_err_deg": yaw_err_deg(pose9, true9, head_b, name.startswith("cube"))})
         verdicts["find"].append((vd.result if vd.result is not None else "timeout", err < 30))
-        # Accept when either the find model or the detector's name check says the object is there; retry only
-        # when both say it is not (each alone has false "not found" calls).
-        ok = vd.result is not False or bool(name_ok)
+        # Ranked detection reports whether its best match is plausible for the request (size and colour fit);
+        # if not, the object is not (clearly) in this view: search again. Without that signal, accept when either
+        # the find model or the name check says found.
+        if args.find_accept == "plausible" and name_ok is not None:
+            ok = bool(name_ok)
+        else:
+            ok = vd.result is not False or bool(name_ok)
         find_log[-1].update(model=vd.result, name_ok=name_ok, accepted=ok)
         return pose9, ok, points
 
