@@ -121,13 +121,20 @@ with sim_app.launch(env_cfg, args):
     def rgb(cam):
         return env.scene[cam].data.output["rgb"][..., :3].to(torch.uint8).cpu().numpy()
 
+    def episode_refs(i):
+        """Object names for env i: cubes fixed, plates with this episode's colours when randomised."""
+        if hasattr(env, "pp_plate_colors"):
+            return language.OBJECT_REFS + [language.plate_ref(j, env.pp_plate_colors[i]) for j in range(language.NUM_PLATES)]
+        return refs
+
     def new_episode(i):
         k = int(rng.integers(len(objects)))
         absent = bool(rng.random() < args.absent_prob)
         start = None
         if rng.random() < args.random_start_prob:
             start = np.array([rng.uniform(*START_BOX[0]), rng.uniform(*START_BOX[1]), rng.uniform(*START_BOX[2])])
-        return {"k": k, "text": language.random_skill_text("find", object=refs[k]), "start": start,
+        names = episode_refs(i)
+        return {"k": k, "name": names[k], "text": language.random_skill_text("find", object=names[k]), "start": start,
                 "absent": absent, "fail_at": None,
                 "phase": "pre" if start is not None else "find", "t": 0, "vis_run": 0, "hold": 0, "at_look": 0,
                 "grip": float(rng.uniform(0, 1)), "sigma": float(rng.uniform(0, args.dart_sigma)),
@@ -228,7 +235,7 @@ with sim_app.launch(env_cfg, args):
             e = eps[i]
             if ok and saved < args.episodes and len(e["action"]) >= 8:
                 g5 = h5.create_group(f"episode_{saved:06d}")
-                g5.attrs["find_text"], g5.attrs["object_name"] = e["text"], refs[e["k"]]
+                g5.attrs["find_text"], g5.attrs["object_name"] = e["text"], e["name"]
                 g5.attrs["fail_mode"] = "absent" if e["absent"] else ""
                 g5.attrs["goal"], g5.attrs["pick_text"], g5.attrs["place_text"] = e["text"], "", ""
                 g5.attrs["cube_idx"], g5.attrs["plate_idx"] = 0, 0

@@ -140,6 +140,10 @@ with sim_app.launch(env_cfg, args):
                     self.result = ok
             return self.result is not None
 
+    def plate_colors():
+        """Plate colour names of the current episode (randomised plate colours) or None."""
+        return env.pp_plate_colors[0] if hasattr(env, "pp_plate_colors") else None
+
     def state_now(head_b):
         pos, quat = math_utils.subtract_frame_transforms(
             robot.data.root_pos_w.torch, robot.data.root_quat_w.torch,
@@ -196,7 +200,7 @@ with sim_app.launch(env_cfg, args):
 
     def perceive_target(skill, cube, plate, head_b):
         """Ask the server's perception (OWLv2 + stereo depth) where the named object is; log its error."""
-        query = language.cube_ref(cube) if skill == "pick" else language.plate_ref(plate)
+        query = language.cube_ref(cube) if skill == "pick" else language.plate_ref(plate, plate_colors())
         conn.send({"cmd": "locate", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": query})
         reply = conn.recv()
         err = 1000 * float(np.linalg.norm(reply["point"] - oracle_target(skill, cube, plate, head_b)))
@@ -232,7 +236,7 @@ with sim_app.launch(env_cfg, args):
 
     def sam2_targets(cmd, cube, plate, head_b, frozen=()):
         """Start or update SAM2 tracking of the episode's pick cube and place plate; returns head-frame points."""
-        queries = {"pick": language.cube_ref(cube), "place": language.plate_ref(plate)}
+        queries = {"pick": language.cube_ref(cube), "place": language.plate_ref(plate, plate_colors())}
         msg = {"cmd": cmd, "left": rgb("left_cam"), "right": rgb("right_cam"), "robot_points": robot_points_head(head_b)}
         if cmd == "sam2_start":
             msg["queries"] = [queries["pick"], queries["place"]]
@@ -459,8 +463,8 @@ with sim_app.launch(env_cfg, args):
         cube_name = f"cube_{cube}"
         rest_z = float(env.scene[cube_name].data.root_pos_w.torch[0, 2])
         steps = [("pick", language.skill_text("pick", object=language.cube_ref(cube))),
-                 ("place", language.skill_text("place", target=language.plate_ref(plate)))]
-        outcome = {"goal": language.goal_instruction(cube, plate), "pick": False, "place": False, "close": None}
+                 ("place", language.skill_text("place", target=language.plate_ref(plate, plate_colors())))]
+        outcome = {"goal": language.goal_instruction(cube, plate, plate_colors()), "pick": False, "place": False, "close": None}
         # Perception looks at the scene once, before the arm moves (like a planner's first observation):
         # later views are occluded by the arm and the held cube. Plates never move; cubes only once grasped.
         perceived = (
@@ -481,7 +485,7 @@ with sim_app.launch(env_cfg, args):
                 conn.recv()
             poses = {}
             for i_obj, (sk, query, name) in enumerate((("pick", language.cube_ref(cube), f"cube_{cube}"),
-                                                      ("place", language.plate_ref(plate), f"plate_{plate}"))):
+                                                      ("place", language.plate_ref(plate, plate_colors()), f"plate_{plate}"))):
                 seed_ = args.seed * 100000 + ep * 10 + 7 + i_obj
                 pose, ok, _ = run_find(query, name, head_b, ep, seed_)  # the find model's own view
                 outcome[f"find_{sk}_attempts"] = 1

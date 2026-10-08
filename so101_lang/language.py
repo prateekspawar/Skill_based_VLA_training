@@ -28,7 +28,12 @@ PLATE_COLORS: dict[str, tuple[float, float, float]] = {
 }
 # Evaluation override of the plate colours, per slot (e.g. SO101_PLATE_COLORS=red,blue -> slot 0 red, slot 1
 # blue). Layouts, tasks (by slot) and everything else stay the same, so runs compare one-to-one.
-_PALETTE = {**CUBE_COLORS, **PLATE_COLORS, "orange": (1.0, 0.45, 0.05), "purple": (0.50, 0.15, 0.75)}
+_PALETTE = {**CUBE_COLORS, **PLATE_COLORS, "orange": (1.0, 0.45, 0.05), "purple": (0.50, 0.15, 0.75),
+            "brown": (0.45, 0.25, 0.10)}
+# Plate colours sampled per episode when plate-colour randomisation is on (env cfg / SO101_RANDOM_PLATE_COLORS=1):
+# includes the cube colours on purpose, so policies rely on the target point and shape rather than colour.
+# Black / gray are left out (the table is dark gray).
+PLATE_PALETTE = ["white", "pink", "red", "blue", "green", "yellow", "orange", "purple", "brown"]
 if os.environ.get("SO101_PLATE_COLORS"):
     PLATE_COLORS = {c: _PALETTE[c] for c in os.environ["SO101_PLATE_COLORS"].split(",")}
 CUBE_NAMES = list(CUBE_COLORS)
@@ -51,6 +56,7 @@ def fold_yaw(yaw: float, kind: str) -> float:
 # Object references the planner may use as skill arguments.
 OBJECT_REFS = [f"{c} cube" for c in CUBE_NAMES]
 TARGET_REFS = [f"{p} plate" for p in PLATE_NAMES]
+ALL_TARGET_REFS = list(dict.fromkeys(TARGET_REFS + [f"{c} plate" for c in PLATE_PALETTE]))
 
 
 @dataclass(frozen=True)
@@ -75,7 +81,7 @@ SKILLS: dict[str, Skill] = {
     "place": Skill(
         name="place",
         description="Put the object currently held in the gripper onto the given target and release it.",
-        params={"target": TARGET_REFS},
+        params={"target": ALL_TARGET_REFS},
         canonical="place it on the {target}",
         train_templates=["place it on the {target}", "put it down on the {target}", "set it on the {target}"],
         heldout_templates=["drop it onto the {target}", "release it over the {target}"],
@@ -84,7 +90,7 @@ SKILLS: dict[str, Skill] = {
         name="find",
         description="Move the arm until the camera has a clear view of the given object, then report its 9-D pose "
         "(position + 6-D rotation, head frame). Run once per object before pick / place.",
-        params={"object": OBJECT_REFS + TARGET_REFS},
+        params={"object": OBJECT_REFS + ALL_TARGET_REFS},
         canonical="find the {object}",
         train_templates=["find the {object}", "look for the {object}", "locate the {object}"],
         heldout_templates=["where is the {object}", "search for the {object}"],
@@ -129,13 +135,14 @@ def cube_ref(cube_idx: int) -> str:
     return OBJECT_REFS[cube_idx]
 
 
-def plate_ref(plate_idx: int) -> str:
-    return TARGET_REFS[plate_idx]
+def plate_ref(plate_idx: int, colors=None) -> str:
+    """Name of plate slot ``plate_idx``; ``colors`` = this episode's plate colour names when randomised."""
+    return f"{colors[plate_idx]} plate" if colors is not None else TARGET_REFS[plate_idx]
 
 
-def goal_instruction(cube_idx: int, plate_idx: int) -> str:
+def goal_instruction(cube_idx: int, plate_idx: int, colors=None) -> str:
     """High-level user instruction for one pick-and-place episode (what the planner receives)."""
-    return f"put the {cube_ref(cube_idx)} on the {plate_ref(plate_idx)}"
+    return f"put the {cube_ref(cube_idx)} on the {plate_ref(plate_idx, colors)}"
 
 
 def train_pairs() -> list[tuple[int, int]]:

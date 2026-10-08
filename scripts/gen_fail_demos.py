@@ -90,9 +90,11 @@ with sim_app.launch(env_cfg, args):
         """Called once the first fresh observation after a reset is in: task, texts, expert re-init and injection."""
         cube, plate = env.pp_task[i].tolist()
         init = local_poses()[i]
-        e.update({"task": (cube, plate), "init": init.astype(np.float32), "goal": language.goal_instruction(cube, plate),
+        pcol = env.pp_plate_colors[i] if hasattr(env, "pp_plate_colors") else None
+        e.update({"task": (cube, plate), "init": init.astype(np.float32), "goal": language.goal_instruction(cube, plate, pcol),
+                  "plate_colors": list(pcol or language.PLATE_NAMES),
                   "pick_text": language.random_skill_text("pick", object=language.cube_ref(cube)),
-                  "place_text": language.random_skill_text("place", target=language.plate_ref(plate))})
+                  "place_text": language.random_skill_text("place", target=language.plate_ref(plate, pcol))})
         expert.reset(torch.tensor([i], device=dev))  # re-initialise from the fresh object poses
         if e["mode"] == "miss":
             ang = rng.uniform(0, 2 * np.pi)
@@ -199,6 +201,7 @@ with sim_app.launch(env_cfg, args):
                 for key in ("goal", "pick_text", "place_text"):
                     g5.attrs[key] = e[key]
                 g5.attrs["cube_idx"], g5.attrs["plate_idx"] = e["task"]
+                g5.attrs["plate_colors"] = e["plate_colors"]
                 g5.attrs["failed_skill"], g5.attrs["fail_mode"] = e["skill"], e["mode"]
                 g5.attrs["moved_pick_mm"] = g5.attrs["moved_place_mm"] = 0.0
                 for key, name in (("left", "left_rgb"), ("right", "right_rgb")):

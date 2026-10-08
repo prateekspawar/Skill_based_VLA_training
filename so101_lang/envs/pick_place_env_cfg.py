@@ -14,6 +14,8 @@ Two action variants share everything else:
 
 from __future__ import annotations
 
+import os
+
 import math
 from dataclasses import MISSING
 
@@ -212,6 +214,11 @@ class EventsCfg:
             "pairs": language.train_pairs(),
         },
     )
+    if os.environ.get("SO101_RANDOM_PLATE_COLORS") == "1":
+        # Per-episode plate colours from language.PLATE_PALETTE (names in env.pp_plate_colors).
+        randomize_plate_colors = EventTerm(
+            func=mdp.randomize_plate_colors, mode="reset", params={"palette": language.PLATE_PALETTE}
+        )
 
 
 @configclass

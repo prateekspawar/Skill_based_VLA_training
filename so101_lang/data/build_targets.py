@@ -107,10 +107,16 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--rot6d", action="store_true",
                     help="Append the target's 6-D rotation (head frame): 9-D target, 19-D state.")
-    ap.add_argument("--yaw_sigma_deg", type=float, default=3.0, help="Per-episode yaw detection error.")
+    ap.add_argument("--yaw_sigma_deg", type=float, default=3.0, help="Per-episode yaw detection error (gauss).")
+    ap.add_argument("--yaw_noise", choices=["gauss", "empirical"], default="gauss",
+                    help="empirical: per-episode yaw error drawn from the errors perception actually makes "
+                         "(data/yaw_error_samples.json, measured in find-pipeline evaluations), random sign.")
     ap.add_argument("--skill", choices=["all", "pick", "place"], default="all",
                     help="Must match the --skill used to convert --src (per-skill datasets).")
     args = ap.parse_args()
+    yaw_samples = None
+    if args.yaw_noise == "empirical":
+        yaw_samples = np.asarray(json.loads((Path(__file__).parent / "yaw_error_samples.json").read_text())["abs_deg"], float)
     rng = np.random.default_rng(args.seed)
     src, dst = Path(args.src), Path(args.dst)
     if dst.exists():
@@ -149,7 +155,11 @@ def main():
                 pos = pos[: len(rows)]
             target[rows, :3] = published_targets(pos, state[rows, :3], skill[rows], rng, args)
             if args.rot6d:  # the active skill's object orientation (constant within the episode) + detection error
-                noisy = yaws[int(e)] + np.deg2rad(rng.normal(0, args.yaw_sigma_deg, 2)) * np.array([1.0, 0.0])
+                if args.yaw_noise == "empirical":
+                    err = rng.choice(yaw_samples) * rng.choice([-1.0, 1.0])
+                else:
+                    err = rng.normal(0, args.yaw_sigma_deg)
+                noisy = yaws[int(e)] + np.deg2rad(np.array([err, 0.0]))
                 # Reported modulo the cube's 90 deg symmetry, as perception (locate9) does.
                 r6 = np.stack([rot6d_head(language.fold_yaw(noisy[0], "cube"), head_in_base), rot6d_head(0.0, head_in_base)])
                 target[rows, 3:] = r6[np.clip(skill[rows], 0, 1)]

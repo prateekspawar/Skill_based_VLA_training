@@ -148,3 +148,29 @@ def target_on_plate(
 def any_cube_dropped(env: ManagerBasedRLEnv, minimum_height: float = -0.05) -> torch.Tensor:
     z = _positions_w(env, CUBE_NAMES)[..., 2] - env.scene.env_origins[:, 2:3]
     return (z < minimum_height).any(dim=-1)
+
+
+def randomize_plate_colors(env: ManagerBasedEnv, env_ids: torch.Tensor, palette: list[str]):
+    """Give each plate of the reset envs a colour from ``palette`` (two distinct per env) and record the names in
+    ``env.pp_plate_colors`` (list per env), so instructions and perception queries can name them.
+
+    Uses its own RNG (seeded from the env seed), so layouts and tasks stay identical to runs without it."""
+    from pxr import Gf, UsdShade
+
+    import omni.usd
+
+    if not hasattr(env, "pp_plate_colors"):
+        env.pp_plate_colors = [list(language.PLATE_NAMES) for _ in range(env.num_envs)]
+        env._plate_color_rng = random.Random(1_000_003 * (env.cfg.seed or 0) + 17)
+        env._plate_shaders = {}
+    stage = omni.usd.get_context().get_stage()
+    ids = range(env.num_envs) if env_ids is None or isinstance(env_ids, slice) else env_ids.tolist()
+    for i in ids:
+        names = env._plate_color_rng.sample(palette, language.NUM_PLATES)
+        env.pp_plate_colors[i] = names
+        for j, c in enumerate(names):
+            key = (i, j)
+            if key not in env._plate_shaders:
+                prim = stage.GetPrimAtPath(f"/World/envs/env_{i}/Plate_{j}/geometry/material/Shader")
+                env._plate_shaders[key] = UsdShade.Shader(prim)
+            env._plate_shaders[key].GetInput("diffuseColor").Set(Gf.Vec3f(*language._PALETTE[c]))

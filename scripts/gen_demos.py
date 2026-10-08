@@ -121,6 +121,10 @@ with sim_app.launch(env_cfg, args):
         obj.write_root_pose_to_sim_index(root_pose=torch.cat([pos, quat], -1).float(), env_ids=ids)
         obj.write_root_velocity_to_sim_index(root_velocity=torch.zeros(1, 6, device=env.device), env_ids=ids)
 
+    def plate_colors(i):
+        """This episode's plate colour names (per-episode randomisation) or None for the fixed colours."""
+        return env.pp_plate_colors[i] if hasattr(env, "pp_plate_colors") else None
+
     def new_buffers(i, init_poses):
         cube, plate = env.pp_task[i].tolist()
         return {
@@ -131,9 +135,10 @@ with sim_app.launch(env_cfg, args):
             },
             "steps": 0, "carry_steps": 0, "cube_pos": [], "plate_pos": [],
             "task": (cube, plate),
-            "goal": language.goal_instruction(cube, plate),
+            "goal": language.goal_instruction(cube, plate, plate_colors(i)),
+            "plate_colors": list(plate_colors(i) or language.PLATE_NAMES),
             "pick_text": language.random_skill_text("pick", object=language.cube_ref(cube)),
-            "place_text": language.random_skill_text("place", target=language.plate_ref(plate)),
+            "place_text": language.random_skill_text("place", target=language.plate_ref(plate, plate_colors(i))),
             "init_poses": init_poses[i],
             "left": [], "right": [], "state": [], "action": [], "joint_pos": [], "skill": [],
             "skip": True,
@@ -230,6 +235,7 @@ with sim_app.launch(env_cfg, args):
                 for key in ("goal", "pick_text", "place_text"):
                     g.attrs[key] = buf[key]
                 g.attrs["cube_idx"], g.attrs["plate_idx"] = buf["task"]
+                g.attrs["plate_colors"] = buf["plate_colors"]
                 for key, name in (("left", "left_rgb"), ("right", "right_rgb")):
                     arr = np.stack(buf[key])
                     g.create_dataset(name, data=arr, chunks=(1, *arr.shape[1:]), compression="gzip", compression_opts=4)
