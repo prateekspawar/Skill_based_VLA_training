@@ -32,8 +32,12 @@ parser.add_argument("--pipeline", choices=["direct", "find"], default="find",
                     help="find (default): find(cube) -> start tracking the cube from that view -> find(plate) while the "
                          "cube keeps tracking -> start tracking the plate -> return home -> pick -> place, all on the "
                          "same trackers. direct: detect both objects from the home view, then pick -> place.")
-parser.add_argument("--find_retries", type=int, default=2,
-                    help="Retries of a find() whose model reports failure (each retry starts from home).")
+parser.add_argument("--find_retries", type=int, default=3,
+                    help="Preset viewing poses tried when a find() result is not plausible (max 3; each moves the arm "
+                         "to a different view and looks again).")
+parser.add_argument("--find_views", choices=["retry", "all"], default="retry",
+                    help="retry: preset views only until a plausible match; all: always look from every preset view "
+                         "too and keep the best plausible match.")
 parser.add_argument("--target_dim", type=int, choices=[3, 9], default=3,
                     help="Target sent to the policy: 3 = position, 9 = position + 6-D rotation (19-D state models).")
 parser.add_argument("--freeze_radius", type=float, default=0.05,
@@ -48,6 +52,8 @@ parser.add_argument("--kp_calib_deg", type=float, default=1.0, help="... and rot
 parser.add_argument("--find_accept", choices=["plausible", "either"], default="plausible",
                     help="plausible: a find result is accepted only if the ranked detection's best match fits the "
                          "request (else retry); either: accept if the find model or the name check says found.")
+parser.add_argument("--rank_debug", action="store_true",
+                    help="Log how the true object fared in the ranked detection whenever a find result is implausible.")
 parser.add_argument("--sam2_every", type=int, default=3, help="Control steps between SAM2 updates during pick.")
 parser.add_argument("--verdict", action="store_true",
                     help="12-D action models: a skill ends when the model reports done ([done, success] > 0.5 for 2 "
@@ -292,15 +298,16 @@ with sim_app.launch(env_cfg, args):
                     reply["info"].get(cq, {}).get("status")))
         return reply["points"]
 
-    def run_find(query, name, head_b, ep, seed):
+    def run_find(query, name, head_b, ep, seed, use_model=True):
         """Run the find model until it reports (or holds still / 6 s), then get the object's 9-D pose from this view
         and (SAM2 targets) start tracking it here. Returns (pose9, ok, points); ok = the model did not report failure."""
-        conn.send({"cmd": "reset", "seed": seed, "skill": "find"})
-        swap.append(conn.recv().get("swap_ms", 0.0))
-        text = language.skill_text("find", object=query)
         t, cmds = 0, []
         vd = Verdict(always=True)  # find always ends on its own verdict when the model has one
-        while t < int(6.0 / env.step_dt) and vd.result is None:
+        if use_model:
+            conn.send({"cmd": "reset", "seed": seed, "skill": "find"})
+            swap.append(conn.recv().get("swap_ms", 0.0))
+            text = language.skill_text("find", object=query)
+        while use_model and t < int(6.0 / env.step_dt) and vd.result is None:
             conn.send({"left": rgb("left_cam"), "right": rgb("right_cam"), "state": state_now(head_b)[0].cpu().numpy(),
                        "task": text, "target": np.zeros(9, np.float32)})
             reply = conn.recv()
@@ -347,12 +354,42 @@ with sim_app.launch(env_cfg, args):
         # Ranked detection reports whether its best match is plausible for the request (size and colour fit);
         # if not, the object is not (clearly) in this view: search again. Without that signal, accept when either
         # the find model or the name check says found.
+        if args.rank_debug and name_ok is False:  # diagnostics (simulator truth used for logging only)
+            conn.send({"cmd": "rank_debug", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": query,
+                       "robot_points": robot_points_head(head_b), "true_point": true9[:3]})
+            dbg = conn.recv()
+            occl = dbg["in_image"] and dbg["depth_at_pixel"] < dbg["true_depth"] - 0.04
+            print(f"[eval] rank debug '{query}': in image {dbg['in_image']} px {dbg['pixel']}, depth at pixel "
+                  f"{dbg['depth_at_pixel']:.3f} vs object {dbg['true_depth']:.3f} ({'OCCLUDED' if occl else 'visible'}) | "
+                  f"true object candidate rank {dbg['true_rank']} {dbg['true_row']} | winner {dbg['winner']}", flush=True)
         if args.find_accept == "plausible" and name_ok is not None:
             ok = bool(name_ok)
         else:
             ok = vd.result is not False or bool(name_ok)
-        find_log[-1].update(model=vd.result, name_ok=name_ok, accepted=ok)
+        find_log[-1].update(model=vd.result, name_ok=name_ok, accepted=ok,
+                            total=(det.get("total") if args.target == "sam2" else None))
         return pose9, ok, points
+
+    # Preprogrammed viewing poses (TCP, robot base frame) whose arm occlusions fall in different image regions
+    # (scripts/probe_look_pose.py): used when a find result is not plausible, or all of them with --find_views all.
+    VIEW_POSES = {"up_back": (0.00, -0.06, 0.30), "right_low": (0.18, -0.02, 0.12), "back_low": (0.00, 0.06, 0.18)}
+
+    def go_to_view(tcp_target, head_b, steps=30, on_step=None):
+        """Scripted move of the TCP to a viewing pose (current gripper orientation), then settle."""
+        pos, quat = math_utils.subtract_frame_transforms(
+            robot.data.root_pos_w.torch, robot.data.root_quat_w.torch,
+            robot.data.body_pos_w.torch[:, gi], robot.data.body_quat_w.torch[:, gi])
+        rot = math_utils.matrix_from_quat(quat)
+        goal = torch.tensor([tcp_target], dtype=torch.float32, device=env.device) - (
+            rot @ torch.tensor(adapter.tcp_offset, dtype=torch.float32, device=env.device).unsqueeze(-1)).squeeze(-1)
+        grip = 1.0 - adapter.opening_from_joint(robot.data.joint_pos.torch[:, 5]).unsqueeze(-1)
+        for k in range(steps + 10):
+            a = min((k + 1) / steps, 1.0)
+            env.step(torch.cat([pos + (goal - pos) * a, quat, grip], -1))
+            if on_step is not None and (k + 1) % args.sam2_every == 0:
+                on_step(head_b)
+            if ep == args.video_episode:
+                frames_out.append(rgb("left_cam"))
 
     def go_home(home_link, head_b, steps=30, on_step=None):
         """Scripted return of the gripper link to its episode-start (home) position over ~1.5 s."""
@@ -445,12 +482,37 @@ with sim_app.launch(env_cfg, args):
             poses = {}
             for i_obj, (sk, query, name) in enumerate((("pick", language.cube_ref(cube), f"cube_{cube}"),
                                                       ("place", language.plate_ref(plate), f"plate_{plate}"))):
-                for attempt in range(1 + args.find_retries):
-                    pose, ok, _ = run_find(query, name, head_b, ep, args.seed * 100000 + ep * 10 + 7 + i_obj + 2 * attempt)
-                    outcome[f"find_{sk}_attempts"] = attempt + 1
-                    if ok:
-                        break
-                    go_home(home_link, head_b, on_step=bg_track)  # retry from home
+                seed_ = args.seed * 100000 + ep * 10 + 7 + i_obj
+                pose, ok, _ = run_find(query, name, head_b, ep, seed_)  # the find model's own view
+                outcome[f"find_{sk}_attempts"] = 1
+                views = list(VIEW_POSES)[: args.find_retries]
+                if args.find_views == "all":
+                    # Look from every preset view as well and keep the best plausible match.
+                    tried = [(find_log[-1].get("total") or -1e9, ok, pose, None)]
+                    for v in views:
+                        go_to_view(VIEW_POSES[v], head_b, on_step=bg_track)
+                        p_, ok_, _ = run_find(query, name, head_b, ep, seed_, use_model=False)
+                        tried.append((find_log[-1].get("total") or -1e9, ok_, p_, v))
+                    outcome[f"find_{sk}_attempts"] = len(tried)
+                    good = [x for x in tried if x[1]]
+                    if good:
+                        best = max(good, key=lambda x: x[0])
+                        ok, pose = True, best[2]
+                        if best[3] != views[-1] if views else False:  # restart tracking at the chosen view
+                            if best[3] is None:
+                                go_home(home_link, head_b, on_step=bg_track)
+                            else:
+                                go_to_view(VIEW_POSES[best[3]], head_b, on_step=bg_track)
+                            pose, _, _ = run_find(query, name, head_b, ep, seed_, use_model=False)
+                    else:
+                        ok = False
+                else:
+                    for k_v, v in enumerate(views):  # retry: change the viewpoint, then look again
+                        if ok:
+                            break
+                        go_to_view(VIEW_POSES[v], head_b, on_step=bg_track)
+                        pose, ok, _ = run_find(query, name, head_b, ep, seed_, use_model=False)
+                        outcome[f"find_{sk}_attempts"] = k_v + 2
                 poses[sk] = pose
                 if not ok:
                     find_failed = True

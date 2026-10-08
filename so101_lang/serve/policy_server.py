@@ -139,7 +139,8 @@ def main():
                             torch.manual_seed(int(msg["seed"]))
                         conn.send({"ok": True, "swap_ms": skills.last_swap_ms if skills else 0.0})
                         continue
-                    if msg.get("cmd") in ("locate", "locate9", "find_start", "sam2_start", "sam2_update", "sam2_reset"):
+                    if msg.get("cmd") in ("locate", "locate9", "find_start", "rank_debug", "sam2_start", "sam2_update",
+                                          "sam2_reset"):
                         if locator is None:
                             from so101_lang.perception.locate import TargetLocator
 
@@ -168,6 +169,26 @@ def main():
                         if msg["cmd"] == "sam2_reset":
                             sam2.reset()
                             conn.send({"ok": True})
+                            continue
+                        if msg["cmd"] == "rank_debug":  # diagnostics: how did the true object fare in the ranking?
+                            from so101_lang.perception.verify import detect_ranked
+
+                            locator.locate(msg["left"], msg["right"], msg["query"], robot_points)
+                            rows = detect_ranked.last_rows
+                            k = locator.calib["intrinsics"]
+                            off = np.asarray(locator.calib["cameras"]["left"]["position_in_head"])
+                            q = np.asarray(msg["true_point"]) - off
+                            u, v = k["cx"] + k["fx"] * (-q[1]) / q[0], k["cy"] + k["fy"] * (-q[2]) / q[0]
+                            inside = 0 <= u < k["width"] and 0 <= v < k["height"]
+                            dep = locator.depth.depth(msg["left"], msg["right"])
+                            d_px = float(dep[int(v), int(u)]) if inside else float("nan")
+                            hit = [i for i, r in enumerate(rows)
+                                   if r["box"][0] <= u <= r["box"][2] and r["box"][1] <= v <= r["box"][3]]
+                            # smallest containing box = the object's own box rather than one spanning several objects
+                            hit.sort(key=lambda i: (rows[i]["box"][2] - rows[i]["box"][0]) * (rows[i]["box"][3] - rows[i]["box"][1]))
+                            conn.send({"in_image": inside, "pixel": [round(u), round(v)], "depth_at_pixel": d_px,
+                                       "true_depth": float(q[0]), "winner": rows[0],
+                                       "true_rank": hit[0] if hit else None, "true_row": rows[hit[0]] if hit else None})
                             continue
                         if msg["cmd"] == "find_start":  # end of find(query): 9-D pose + start tracking it from this view
                             from so101_lang.perception.locate import locate9, verify_name

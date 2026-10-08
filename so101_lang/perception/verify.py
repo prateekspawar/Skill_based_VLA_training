@@ -200,6 +200,11 @@ def detect_ranked(locator, rgb: np.ndarray, query: str, depth: np.ndarray | None
         total = logsig(logits[i, 0]) + logsig(logits[i, 1]) + np.log(max(s_lik, 1e-6)) + np.log(COLOR_FLOOR + c_sim)
         rows.append((total, i, s_lik, c_sim, size_m))
     rows.sort(key=lambda r: -r[0])
+    detect_ranked.last_rows = [  # every candidate's terms (diagnostics only)
+        {"box": [round(float(v)) for v in boxes[r[1]]], "total": round(float(r[0]), 2),
+         "det": round(float(1 / (1 + np.exp(-logits[r[1], 0]))), 3), "noun": round(float(1 / (1 + np.exp(-logits[r[1], 1]))), 3),
+         "size": round(r[2], 3), "color": round(r[3], 3),
+         "size_m": None if r[4] is None else [round(r[4][0], 3), round(r[4][1], 3)]} for r in rows]
     total, i, s_lik, c_sim, size_m = rows[0]
     score = float(1 / (1 + np.exp(-logits[i, 0])))
     info = {"terms": {"det": round(score, 3), "noun": round(float(1 / (1 + np.exp(-logits[i, 1]))), 3),
@@ -207,5 +212,5 @@ def detect_ranked(locator, rgb: np.ndarray, query: str, depth: np.ndarray | None
             "size_m": None if size_m is None else [round(size_m[0], 4), round(size_m[1], 4)],
             "plausible": bool(s_lik > 0.3 and (c_sim > 0.15 or not colors)),
             "rank_by_detector": cands.index(i), "n_candidates": len(cands),
-            "margin": round(float(total - rows[1][0]), 2) if len(rows) > 1 else None}
+            "margin": round(float(total - rows[1][0]), 2) if len(rows) > 1 else None, "total": round(float(total), 3)}
     return boxes[i], score, info
