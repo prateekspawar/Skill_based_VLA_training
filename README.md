@@ -242,6 +242,14 @@ trust is kept.
 Stationary pick misses are now dominated by the cube-angle estimate: target yaw error median 18° in misses vs
 2° in successful picks.
 
+**Plate colours (2026-10-08).** The same first 25 stationary and 25 push episodes were rerun with the plates
+recoloured by slot (white → red, pink → blue; `SO101_PLATE_COLORS=red,blue`). The models were not retrained.
+- Place success after a good pick: **19/21 (90 %) vs 18/29 (62 %)** with white/pink. On the 11 stationary episodes
+  picked in both runs, place succeeded 11/11 vs 7/11. The place model handles colour names it never saw, because
+  the target comes from perception.
+- Pick dropped (stationary 20 → 15, push 9 → 6): "blue cube" / "red cube" detections now land on the same-coloured
+  plate, 7 cube targets 106–246 mm off at find. Plate colours must not repeat cube colours.
+
 Findings:
 1. **Find works as intended.** Wrong-target pick failures fall from 13 to 5 per 50 episodes. Find pose error is
    1 mm (cube) / 7 mm (plate) median. Pick reaches 76 %, the best so far, even though the skills end on the model's
