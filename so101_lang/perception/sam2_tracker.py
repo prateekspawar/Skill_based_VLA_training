@@ -59,8 +59,8 @@ class Sam2PointTracker:
         settle_n: int = 3,
         area_band: tuple[float, float] = (0.7, 1.4),
         max_robot_frac: float = 0.15,
-        follow_area_band: tuple[float, float] = (0.4, 2.0),
-        follow_max_robot_frac: float = 0.5,
+        follow_area_band: tuple[float, float] = (0.7, 1.4),  # looser (0.4, 2.0) / 0.5 tested: worse (README)
+        follow_max_robot_frac: float = 0.15,
     ):
         from transformers import Sam2VideoModel, Sam2VideoProcessor
 

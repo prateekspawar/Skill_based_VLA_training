@@ -231,11 +231,14 @@ No simulator ground truth reaches the tracker.
 | displacement deadband 2.5 cm (old) | 73 / 48 % | 2 mm | 29 / 20 % | 21 mm |
 | deadband 1 cm, freeze 3 cm | 72 / 43 % | 15 mm | **43 / 25 %** | 14 mm |
 | **state-based** (locked / following on trusted measurements) | **79 / 52 %** | 2 mm | 35 / 23 % | 17 mm |
+| state-based, looser trust while following (mask 0.4–2×, robot share <50 %) | 72 / 50 % | 2 mm | 33 / 23 % | 17 mm |
 
 The state tracker publishes the clear-view detection while locked. It follows only after two consistent
 trusted measurements more than 1.5 cm away, and locks again once still. A measurement is trusted when the mask
 is 0.7–1.4× its find-view size and <15 % of its pixels lie on the robot. While the cube is still sliding it
-rejects too many measurements (mask size), so it follows pushes more slowly than the 1 cm deadband.
+rejects many measurements (mask size), so it follows pushes more slowly than the 1 cm deadband. Accepting those
+measurements while following does not help: they are the gripper-occluded ones, which drag the target. Strict
+trust is kept.
 Stationary pick misses are now dominated by the cube-angle estimate: target yaw error median 18° in misses vs
 2° in successful picks.
 
