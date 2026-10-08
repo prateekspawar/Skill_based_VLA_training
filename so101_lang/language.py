@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import random
 from dataclasses import dataclass, field
 
@@ -25,6 +26,11 @@ PLATE_COLORS: dict[str, tuple[float, float, float]] = {
     "white": (0.92, 0.92, 0.92),
     "pink": (1.0, 0.45, 0.70),
 }
+# Evaluation override of the plate colours, per slot (e.g. SO101_PLATE_COLORS=red,blue -> slot 0 red, slot 1
+# blue). Layouts, tasks (by slot) and everything else stay the same, so runs compare one-to-one.
+_PALETTE = {**CUBE_COLORS, **PLATE_COLORS, "orange": (1.0, 0.45, 0.05), "purple": (0.50, 0.15, 0.75)}
+if os.environ.get("SO101_PLATE_COLORS"):
+    PLATE_COLORS = {c: _PALETTE[c] for c in os.environ["SO101_PLATE_COLORS"].split(",")}
 CUBE_NAMES = list(CUBE_COLORS)
 PLATE_NAMES = list(PLATE_COLORS)
 NUM_CUBES = len(CUBE_NAMES)
@@ -86,7 +92,9 @@ SKILLS: dict[str, Skill] = {
 }
 
 # (cube, plate) pairs never sampled as a training episode; used by the "new combination" benchmark suite.
-HELDOUT_PAIRS = {("yellow", "pink"), ("green", "white")}
+# Defined by slot so a plate-colour override keeps the same task sampling: (yellow, plate 1), (green, plate 0).
+_HELDOUT_SLOTS = {(3, 1), (1, 0)}
+HELDOUT_PAIRS = {(CUBE_NAMES[c], PLATE_NAMES[p]) for c, p in _HELDOUT_SLOTS}
 
 
 def skill_text(skill: str, template: str | None = None, **args: str) -> str:
