@@ -11,6 +11,8 @@ further along the viewing ray so it approximates the object's centre rather than
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import torch
 
@@ -36,10 +38,23 @@ class TargetLocator:
         self.processor = Owlv2Processor.from_pretrained(OWL_MODEL)
         self.model = Owlv2ForObjectDetection.from_pretrained(OWL_MODEL).to(device).eval()
         self.depth = make_depth_backend(depth_kind, calibration)
+        # Verified detection (attribute contrast + stereo size check, perception/verify.py); SO101_VERIFY_DET=0 off.
+        self.verify = os.environ.get("SO101_VERIFY_DET", "1") != "0"
+        self.last_detect_info: dict = {}
 
     @torch.no_grad()
-    def detect(self, rgb: np.ndarray, query: str) -> tuple[np.ndarray, float]:
-        """Best box (x0, y0, x1, y1) in pixels and its score for a text query like "red cube"."""
+    def detect(self, rgb: np.ndarray, query: str, depth: np.ndarray | None = None,
+               robot_points=None) -> tuple[np.ndarray, float]:
+        """Best box (x0, y0, x1, y1) in pixels and its score for a text query like "red cube".
+
+        With verification on, the best box that also passes the attribute-contrast and size checks
+        (``depth``: stereo depth of the same frame, for the size check); details in ``last_detect_info``."""
+        if self.verify:
+            from .verify import detect_verified
+
+            box, score, self.last_detect_info = detect_verified(self, rgb, query, depth, detector_prompt(query), robot_points)
+            return box, score
+        self.last_detect_info = {}
         inputs = self.processor(text=[[detector_prompt(query)]], images=rgb, return_tensors="pt").to(self.device)
         out = self.model(**inputs)
         h, w = rgb.shape[:2]
@@ -52,15 +67,17 @@ class TargetLocator:
         box = np.clip(box, 0, [w - 1, h - 1, w - 1, h - 1])
         return box, float(res["scores"][best])
 
-    def locate(self, left: np.ndarray, right: np.ndarray, query: str) -> tuple[np.ndarray, dict]:
-        box, score = self.detect(left, query)
+    def locate(self, left: np.ndarray, right: np.ndarray, query: str, robot_points=None) -> tuple[np.ndarray, dict]:
+        depth = self.depth.depth(left, right)
+        box, score = self.detect(left, query, depth, robot_points)
+        det_info = dict(self.last_detect_info)
         x0, y0, x1, y1 = box
         # Central 50% of the box avoids background pixels at the edges.
         cx, cy, hw, hh = (x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 4, (y1 - y0) / 4
         mask = np.zeros(left.shape[:2], dtype=bool)
         mask[int(max(cy - hh, 0)) : int(cy + hh) + 1, int(max(cx - hw, 0)) : int(cx + hw) + 1] = True
-        p, n = self.point_from_mask(self.depth.depth(left, right), mask, query)
-        return p, {"box": box.tolist(), "score": score, "n_depth_px": n}
+        p, n = self.point_from_mask(depth, mask, query)
+        return p, {"box": box.tolist(), "score": score, "n_depth_px": n, "detect": det_info}
 
     def point_from_mask(
         self,
@@ -165,9 +182,10 @@ def verify_name(locator: "TargetLocator", rgb: np.ndarray, query: str) -> tuple[
     return margin > 0, margin
 
 
-def locate9(locator: "TargetLocator", left: np.ndarray, right: np.ndarray, query: str) -> tuple[np.ndarray, dict]:
+def locate9(locator: "TargetLocator", left: np.ndarray, right: np.ndarray, query: str,
+            robot_points=None) -> tuple[np.ndarray, dict]:
     """9-D pose (head-frame position + 6-D rotation) of a named object; the output of the find() skill."""
-    point, info = locator.locate(left, right, query)
+    point, info = locator.locate(left, right, query, robot_points)
     depth = locator.depth.depth(left, right)
     yaw = estimate_yaw_base(locator, depth, info["box"], query)
     info["yaw_base_deg"] = float(np.rad2deg(yaw))

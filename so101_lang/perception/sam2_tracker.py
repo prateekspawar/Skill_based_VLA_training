@@ -234,11 +234,11 @@ class Sam2PointTracker:
         self.session = self.processor.init_video_session(inference_device=self.device, dtype=torch.float32)
         boxes, scores = [], {}
         for q in self.queries:
-            box, score = self.locator.detect(left, q)
+            box, score = self.locator.detect(left, q, self.locator.depth.depth(left, right), robot_points)
             boxes.append([float(v) for v in box])
             scores[q] = score
             # Box-based detection: the published starting point (and fallback if SAM2's first mask is unusable).
-            self.base[q], _ = self.locator.locate(left, right, q)
+            self.base[q], _ = self.locator.locate(left, right, q, robot_points)
             self.points[q] = self.base[q]
         info = self._step(left, right, robot_points, prompt_boxes=boxes)
         for q in self.queries:
