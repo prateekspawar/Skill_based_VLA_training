@@ -8,7 +8,7 @@ rejected by a hard threshold. Every plausible object is ranked against the reque
   every object of that kind in view is considered (non-maximum suppression across both);
 * detector terms: the box's OWLv2 score for the request and for the noun;
 * size likelihood (stereo): height above the locally estimated support plane ("up" from the hand-eye
-  calibration) and horizontal footprint, compared with a coarse range for the noun (cube 1.5-10 cm tall, plate
+  calibration) and horizontal footprint, compared with a coarse range for the noun (cube 2-10 cm tall, plate
   under 2.5 cm, ...). It is 1 inside the range and decays smoothly outside. Nouns without a range get 1;
 * colour similarity: each of the object's own pixels (above the support plane, not on the robot) is compared
   with the requested colour. Chromatic colours use hue distance weighted by saturation; white / gray / black use
@@ -27,7 +27,7 @@ import torch
 COLORS = ["red", "green", "blue", "yellow", "orange", "purple", "pink", "white", "black", "gray", "brown"]
 # Coarse size ranges [m] per noun: h = height above the supporting surface, w = largest horizontal extent.
 SIZE_PRIORS = {
-    "cube": {"h": (0.015, 0.10), "w": (0.015, 0.10)},
+    "cube": {"h": (0.02, 0.10), "w": (0.015, 0.10)},
     "block": {"h": (0.015, 0.10), "w": (0.015, 0.12)},
     "plate": {"h": (0.0, 0.025), "w": (0.04, 0.40)},
     "dish": {"h": (0.0, 0.04), "w": (0.06, 0.35)},
@@ -38,10 +38,10 @@ SIZE_PRIORS = {
 }
 HUES = {"red": 0, "orange": 30, "yellow": 58, "green": 125, "blue": 215, "purple": 275, "pink": 330, "brown": 25}
 TOP_K = 10
-HUE_SIGMA = 30.0  # [deg]
+HUE_SIGMA = 18.0  # [deg]; red vs yellow (~56 deg apart) must not share much credit
 SAT_FULL = 0.25  # saturation at which a pixel's hue counts fully
 COLOR_FLOOR = 0.05
-SIZE_SIGMA = 0.5  # in log-ratio units outside the range
+SIZE_SIGMA = 0.2  # in log-ratio units outside the range (a 1.2 cm flat plate scores ~0.04 as a cube)
 USE_SIZE, USE_COLOR = True, True
 
 
