@@ -174,7 +174,7 @@ def main():
 
                             pose, linfo = locate9(locator, msg["left"], msg["right"], msg["query"], robot_points)
                             if locator.verify:  # verified detection: both checks passed on the chosen box
-                                name_ok, margin = bool(linfo["detect"].get("verified")), float("nan")
+                                name_ok, margin = bool(linfo["detect"].get("plausible")), float("nan")
                             else:
                                 name_ok, margin = verify_name(locator, msg["left"], msg["query"])
                             points, info = sam2.add(msg["left"], msg["right"], msg["query"], robot_points)

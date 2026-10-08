@@ -321,6 +321,7 @@ with sim_app.launch(env_cfg, args):
                        "robot_points": robot_points_head(head_b)})
             reply = conn.recv()
             pose9, points, name_ok = reply["pose9"], reply["points"], reply.get("name_ok")
+            det = reply.get("detect", {})
             if query not in tracked:
                 tracked.append(query)
         else:
@@ -330,6 +331,13 @@ with sim_app.launch(env_cfg, args):
         err = 1000 * float(np.linalg.norm(pose9[:3] - true9[:3]))
         sk = "pick" if name.startswith("cube") else "place"
         ep_track[sk].append(("find_start", err, "init"))
+        if args.target == "sam2" and err > 30:  # which scene object did the wrong detection land on?
+            sk_ = "pick" if name.startswith("cube") else "place"
+            objs = {f"cube {language.CUBE_NAMES[i]}": truth_pose9(f"cube_{i}", head_b)[:3] for i in range(language.NUM_CUBES)}
+            objs.update({f"plate {language.PLATE_NAMES[j]}": truth_pose9(f"plate_{j}", head_b)[:3] for j in range(language.NUM_PLATES)})
+            k_ = min(objs, key=lambda o: np.linalg.norm(pose9[:3] - objs[o]))
+            print(f"[eval] wrong find: '{query}' -> nearest {k_} {1000 * np.linalg.norm(pose9[:3] - objs[k_]):.0f}mm "
+                  f"| detect {det}", flush=True)
         find_log.append({"obj": query, "steps": t, "pos_err_mm": err,
                          "yaw_err_deg": yaw_err_deg(pose9, true9, head_b, name.startswith("cube"))})
         verdicts["find"].append((vd.result if vd.result is not None else "timeout", err < 30))

@@ -50,9 +50,9 @@ class TargetLocator:
         With verification on, the best box that also passes the attribute-contrast and size checks
         (``depth``: stereo depth of the same frame, for the size check); details in ``last_detect_info``."""
         if self.verify:
-            from .verify import detect_verified
+            from .verify import detect_ranked
 
-            box, score, self.last_detect_info = detect_verified(self, rgb, query, depth, detector_prompt(query), robot_points)
+            box, score, self.last_detect_info = detect_ranked(self, rgb, query, depth, detector_prompt(query), robot_points)
             return box, score
         self.last_detect_info = {}
         inputs = self.processor(text=[[detector_prompt(query)]], images=rgb, return_tensors="pt").to(self.device)
