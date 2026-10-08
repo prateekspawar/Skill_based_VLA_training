@@ -250,6 +250,31 @@ recoloured by slot (white → red, pink → blue; `SO101_PLATE_COLORS=red,blue`)
 - Pick dropped (stationary 20 → 15, push 9 → 6): "blue cube" / "red cube" detections now land on the same-coloured
   plate, 7 cube targets 106–246 mm off at find. Plate colours must not repeat cube colours.
 
+**Perception for plates that share colours with cubes (red/blue plates, same 25 stationary + 25 push scenes;
+2026-10-08).**
+
+| Variant | Stationary pick / full | Push pick / full | wrong cube at find | find failed |
+|---|---|---|---|---|
+| white/pink plates (reference) | 20 / 12 | 9 / 6 | 4 | 1 |
+| red/blue, plain OWLv2 | 15 / 14 | 6 / 5 | 10 | 0 |
+| ranked detection + plausibility gate, retry from home | 14 / 11 | 8 / 7 | 0 | 8 |
+| **ranked + gate, retry from preset views (default)** | **15 / 13** | 6 / 5 | 2 | 2 |
+| ranked + gate, always all views | 9 / 1 | 5 / 0 | 5 | 4 |
+
+- **Ranked detection** (`perception/verify.py`) scores every candidate box: detector score for the request and for
+  the noun, soft stereo size likelihood, and colour similarity of the object's own pixels. The best match wins.
+  If even that match does not fit the request in size and colour, find retries from the next preset viewing pose
+  (up_back, right_low, back_low). The gate is reliable: 0-1 wrong accepts and no wrong rejects per run.
+- A rejected find is almost always the arm hiding the object, or arm pixels inside its box (rank_debug: 9 of 13
+  occluded). Retrying from home repeats the occlusion; a different viewpoint fixes it.
+- Always touring all views hurts: the arm sweeping the scene makes the cube and plate trackers drift (21/50
+  episodes more than 3 cm off before pick). Oblique views also give plausible but mispositioned matches.
+- Remaining red/blue pick gap: grasp misses with a correct target (8 vs 2). About half are cube-angle errors; the
+  rest look like a visual shift, since pick was trained only with white/pink plates. Fix: vary plate colours in
+  the training data.
+- An attribute contrast via OWLv2 prompts ("a blue plate" vs "a blue cube") was tried and is off: OWLv2 is not
+  reliable at fine attribute distinctions.
+
 Findings:
 1. **Find works as intended.** Wrong-target pick failures fall from 13 to 5 per 50 episodes. Find pose error is
    1 mm (cube) / 7 mm (plate) median. Pick reaches 76 %, the best so far, even though the skills end on the model's
