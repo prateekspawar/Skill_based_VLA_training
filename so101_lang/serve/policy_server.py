@@ -140,7 +140,7 @@ def main():
                         conn.send({"ok": True, "swap_ms": skills.last_swap_ms if skills else 0.0})
                         continue
                     if msg.get("cmd") in ("locate", "locate9", "find_start", "rank_debug", "sam2_start", "sam2_update",
-                                          "sam2_reset"):
+                                          "sam2_reset", "sam2_remove"):
                         if locator is None:
                             from so101_lang.perception.locate import TargetLocator
 
@@ -154,7 +154,8 @@ def main():
                         if msg["cmd"] == "locate9":  # find(): 9-D pose of the named object
                             from so101_lang.perception.locate import locate9
 
-                            pose, info = locate9(locator, msg["left"], msg["right"], msg["query"])
+                            pose, info = locate9(locator, msg["left"], msg["right"], msg["query"],
+                                                 msg.get("robot_points"), msg.get("prior_point"))
                             conn.send({"pose9": pose, **info, "t_locate": time.time() - t0})
                             continue
                         if sam2 is None:
@@ -168,6 +169,10 @@ def main():
                         robot_points = msg.get("robot_points")  # robot keypoints (head frame) for the self-filter
                         if msg["cmd"] == "sam2_reset":
                             sam2.reset()
+                            conn.send({"ok": True})
+                            continue
+                        if msg["cmd"] == "sam2_remove":
+                            sam2.remove(msg["query"])
                             conn.send({"ok": True})
                             continue
                         if msg["cmd"] == "rank_debug":  # diagnostics: how did the true object fare in the ranking?
@@ -193,12 +198,14 @@ def main():
                         if msg["cmd"] == "find_start":  # end of find(query): 9-D pose + start tracking it from this view
                             from so101_lang.perception.locate import locate9, verify_name
 
-                            pose, linfo = locate9(locator, msg["left"], msg["right"], msg["query"], robot_points)
+                            pose, linfo = locate9(locator, msg["left"], msg["right"], msg["query"], robot_points,
+                                                  msg.get("prior_point"))
                             if locator.verify:  # verified detection: both checks passed on the chosen box
                                 name_ok, margin = bool(linfo["detect"].get("plausible")), float("nan")
                             else:
                                 name_ok, margin = verify_name(locator, msg["left"], msg["query"])
-                            points, info = sam2.add(msg["left"], msg["right"], msg["query"], robot_points)
+                            points, info = sam2.add(msg["left"], msg["right"], msg["query"], robot_points,
+                                                    msg.get("prior_point"), msg.get("base_point"))
                             conn.send({"pose9": pose, "score": linfo["score"], "name_ok": name_ok, "name_margin": margin,
                                        "detect": linfo.get("detect", {}),
                                        "points": points, "info": info, "t_locate": time.time() - t0})

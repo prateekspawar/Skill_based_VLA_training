@@ -227,18 +227,24 @@ class Sam2PointTracker:
             return {"status": "settled", "mask_px": area, "px_used": n}
         return {"status": "following", "mask_px": area, "px_used": n}
 
-    def start(self, left, right, queries, robot_points=None):
+    def start(self, left, right, queries, robot_points=None, prior_points=None, base_points=None):
+        """``prior_points``: per query, an earlier position estimate that steers the detection; ``base_points``:
+        per query, the published starting point (e.g. fused from several views) instead of this frame's."""
+        prior_points, base_points = prior_points or {}, base_points or {}
         self.queries = list(queries)
         self.points, self.area0, self.pending, self.base, self.ref = {}, {}, {}, {}, {}
         self.state, self.anchor, self.recent, self.departs = {}, {}, {}, {}
         self.session = self.processor.init_video_session(inference_device=self.device, dtype=torch.float32)
         boxes, scores = [], {}
         for q in self.queries:
-            box, score = self.locator.detect(left, q, self.locator.depth.depth(left, right), robot_points)
+            box, score = self.locator.detect(left, q, self.locator.depth.depth(left, right), robot_points,
+                                             prior_points.get(q))
             boxes.append([float(v) for v in box])
             scores[q] = score
             # Box-based detection: the published starting point (and fallback if SAM2's first mask is unusable).
-            self.base[q], _ = self.locator.locate(left, right, q, robot_points)
+            self.base[q], _ = self.locator.locate(left, right, q, robot_points, prior_points.get(q))
+            if base_points.get(q) is not None:
+                self.base[q] = np.asarray(base_points[q], dtype=np.float32)
             self.points[q] = self.base[q]
         info = self._step(left, right, robot_points, prompt_boxes=boxes)
         for q in self.queries:
@@ -278,16 +284,19 @@ class Sam2MultiTracker:
             out.update(t.published())
         return out
 
-    def add(self, left, right, query, robot_points=None):
+    def add(self, left, right, query, robot_points=None, prior_point=None, base_point=None):
         """(Re)start tracking ``query`` from this frame: OWLv2 box -> SAM2 prompt; other objects are untouched."""
         if self._model_owner is None:
             self._model_owner = Sam2PointTracker(self.locator, **self.kwargs)
             t = self._model_owner
         else:
             t = Sam2PointTracker(self.locator, shared=self._model_owner, **self.kwargs)
-        _, info = t.start(left, right, [query], robot_points)
+        _, info = t.start(left, right, [query], robot_points, {query: prior_point}, {query: base_point})
         self.trackers[query] = t
         return self.published(), info
+
+    def remove(self, query):
+        self.trackers.pop(query, None)
 
     def start(self, left, right, queries, robot_points=None):
         """All objects from the same frame (direct pipeline)."""

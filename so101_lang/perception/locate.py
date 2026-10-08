@@ -44,7 +44,7 @@ class TargetLocator:
 
     @torch.no_grad()
     def detect(self, rgb: np.ndarray, query: str, depth: np.ndarray | None = None,
-               robot_points=None) -> tuple[np.ndarray, float]:
+               robot_points=None, prior_point=None) -> tuple[np.ndarray, float]:
         """Best box (x0, y0, x1, y1) in pixels and its score for a text query like "red cube".
 
         With verification on, the best box that also passes the attribute-contrast and size checks
@@ -52,7 +52,8 @@ class TargetLocator:
         if self.verify:
             from .verify import detect_ranked
 
-            box, score, self.last_detect_info = detect_ranked(self, rgb, query, depth, detector_prompt(query), robot_points)
+            box, score, self.last_detect_info = detect_ranked(self, rgb, query, depth, detector_prompt(query), robot_points,
+                                                              prior_point)
             return box, score
         self.last_detect_info = {}
         inputs = self.processor(text=[[detector_prompt(query)]], images=rgb, return_tensors="pt").to(self.device)
@@ -67,9 +68,10 @@ class TargetLocator:
         box = np.clip(box, 0, [w - 1, h - 1, w - 1, h - 1])
         return box, float(res["scores"][best])
 
-    def locate(self, left: np.ndarray, right: np.ndarray, query: str, robot_points=None) -> tuple[np.ndarray, dict]:
+    def locate(self, left: np.ndarray, right: np.ndarray, query: str, robot_points=None,
+               prior_point=None) -> tuple[np.ndarray, dict]:
         depth = self.depth.depth(left, right)
-        box, score = self.detect(left, query, depth, robot_points)
+        box, score = self.detect(left, query, depth, robot_points, prior_point)
         det_info = dict(self.last_detect_info)
         x0, y0, x1, y1 = box
         # Central 50% of the box avoids background pixels at the edges.
@@ -183,9 +185,9 @@ def verify_name(locator: "TargetLocator", rgb: np.ndarray, query: str) -> tuple[
 
 
 def locate9(locator: "TargetLocator", left: np.ndarray, right: np.ndarray, query: str,
-            robot_points=None) -> tuple[np.ndarray, dict]:
+            robot_points=None, prior_point=None) -> tuple[np.ndarray, dict]:
     """9-D pose (head-frame position + 6-D rotation) of a named object; the output of the find() skill."""
-    point, info = locator.locate(left, right, query, robot_points)
+    point, info = locator.locate(left, right, query, robot_points, prior_point)
     depth = locator.depth.depth(left, right)
     yaw = estimate_yaw_base(locator, depth, info["box"], query)
     info["yaw_base_deg"] = float(np.rad2deg(yaw))

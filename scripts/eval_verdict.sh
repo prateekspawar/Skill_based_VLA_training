@@ -14,6 +14,7 @@ until grep -q "^\[verdict\] .* done" logs/stage_verdict.log; do sleep 60; done
 [[ -n "${WAIT_FOR:-}" ]] && until grep -qE "${WAIT_FOR#*:}" "${WAIT_FOR%%:*}"; do sleep 60; done
 # Checkpoint names per skill (override e.g. CK_PICK=pick9fm): checkpoints/<name>_<steps>.
 ck() { local v="CK_${1^^}"; echo checkpoints/${!v:-${1}9s}_$STEPS/checkpoints/last/pretrained_model; }
+rm -f $OUT/server.log  # a stale "listening" line from an earlier run must not start the evals early
 ~/lerobot-env/bin/python -m so101_lang.serve.policy_server --skills pick=$(ck pick) place=$(ck place) find=$(ck find) \
   --depth fast_foundationstereo > $OUT/server.log 2>&1 &
 server=$!

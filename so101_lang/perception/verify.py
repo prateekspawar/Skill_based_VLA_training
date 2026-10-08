@@ -43,6 +43,7 @@ SAT_FULL = 0.25  # saturation at which a pixel's hue counts fully
 COLOR_FLOOR = 0.05
 SIZE_SIGMA = 0.2  # in log-ratio units outside the range (a 1.2 cm flat plate scores ~0.04 as a cube)
 USE_SIZE, USE_COLOR = True, True
+PRIOR_SIGMA = 0.03  # [m] soft preference for candidates near a given prior point
 
 
 def split_query(query: str) -> tuple[list[str], str]:
@@ -109,6 +110,7 @@ def measure_size(calib: dict, depth: np.ndarray, box, robot_points=None, robot_r
         pin, vs, us = pin[keep], vs[keep], us[keep]
         pring = pring[far(pring)]
     measure_size.last_pixels = None
+    measure_size.last_center = None
     if len(pin) < 20 or len(pring) < 20:
         return None
     to_b = lambda p: p @ hib[:3, :3].T + hib[:3, 3]
@@ -119,6 +121,7 @@ def measure_size(calib: dict, depth: np.ndarray, box, robot_points=None, robot_r
     sel = hgt > max(0.4 * height, 0.003)
     obj = bin_[sel]
     measure_size.last_pixels = (vs[sel], us[sel])  # the object's own pixels (above the support, not robot)
+    measure_size.last_center = np.median(pin[sel], axis=0) if sel.any() else None  # head frame
     if len(obj) < 10:
         return height, 0.0
     xy = obj[:, :2] - obj[:, :2].mean(0)
@@ -162,7 +165,7 @@ def size_likelihood(size_m, prior) -> float:
 
 @torch.no_grad()
 def detect_ranked(locator, rgb: np.ndarray, query: str, depth: np.ndarray | None, detector_prompt: str,
-                  robot_points=None):
+                  robot_points=None, prior_point=None):
     """Best-matching box for ``query``: (box, score, info). ``info["terms"]`` lists the ranking terms."""
     attrs, noun = split_query(query)
     texts = [detector_prompt, f"a {noun}"]
@@ -198,6 +201,10 @@ def detect_ranked(locator, rgb: np.ndarray, query: str, depth: np.ndarray | None
         else:
             c_sim = 1.0
         total = logsig(logits[i, 0]) + logsig(logits[i, 1]) + np.log(max(s_lik, 1e-6)) + np.log(COLOR_FLOOR + c_sim)
+        if prior_point is not None:  # an earlier estimate of where the object is (e.g. fused from several views)
+            ctr = measure_size.last_center if depth is not None else None
+            if ctr is not None:
+                total += -0.5 * min((np.linalg.norm(ctr - np.asarray(prior_point)) / PRIOR_SIGMA) ** 2, 50.0)
         rows.append((total, i, s_lik, c_sim, size_m))
     rows.sort(key=lambda r: -r[0])
     detect_ranked.last_rows = [  # every candidate's terms (diagnostics only)

@@ -35,9 +35,11 @@ parser.add_argument("--pipeline", choices=["direct", "find"], default="find",
 parser.add_argument("--find_retries", type=int, default=3,
                     help="Preset viewing poses tried when a find() result is not plausible (max 3; each moves the arm "
                          "to a different view and looks again).")
-parser.add_argument("--find_views", choices=["retry", "all"], default="retry",
+parser.add_argument("--find_views", choices=["retry", "all", "fused"], default="retry",
                     help="retry: preset views only until a plausible match; all: always look from every preset view "
-                         "too and keep the best plausible match.")
+                         "too and keep the best plausible match; fused: look from the find view and every preset "
+                         "view with all trackers paused, fuse the plausible detections that agree (2 cm), then "
+                         "start both trackers from home anchored at the fused positions.")
 parser.add_argument("--target_dim", type=int, choices=[3, 9], default=3,
                     help="Target sent to the policy: 3 = position, 9 = position + 6-D rotation (19-D state models).")
 parser.add_argument("--freeze_radius", type=float, default=0.05,
@@ -246,11 +248,11 @@ with sim_app.launch(env_cfg, args):
         reply = conn.recv()
         out = {}
         for sk, q in queries.items():
-            out[sk] = reply["points"][q]
+            out[sk] = reply["points"][q] if q in reply["points"] else static_targets[sk]
             if sk not in frozen:
                 track_err.append((sk, 1000 * float(np.linalg.norm(out[sk] - oracle_target(sk, cube, plate, head_b)))))
-                ep_track[sk].append((cmd, track_err[-1][1], reply["info"][q]["status"]))
-            st = reply["info"][q]["status"]
+                ep_track[sk].append((cmd, track_err[-1][1], reply["info"].get(q, {}).get("status", "static")))
+            st = reply["info"].get(q, {}).get("status", "static")  # "static": fixed position, no tracker
             track_status[st] = track_status.get(st, 0) + 1
         return out
 
@@ -302,7 +304,7 @@ with sim_app.launch(env_cfg, args):
                     reply["info"].get(cq, {}).get("status")))
         return reply["points"]
 
-    def run_find(query, name, head_b, ep, seed, use_model=True):
+    def run_find(query, name, head_b, ep, seed, use_model=True, start_tracker=True):
         """Run the find model until it reports (or holds still / 6 s), then get the object's 9-D pose from this view
         and (SAM2 targets) start tracking it here. Returns (pose9, ok, points); ok = the model did not report failure."""
         t, cmds = 0, []
@@ -329,8 +331,14 @@ with sim_app.launch(env_cfg, args):
             if vd.result is None and len(reply["actions"][0]) <= 10 and t >= 10 \
                     and np.linalg.norm(recent - recent.mean(0), axis=1).max() < 0.004:
                 break  # model without verdict dims: holding still means it judges the view clear
-        points, name_ok = None, None
-        if args.target == "sam2":
+        points, name_ok, det = None, None, {}
+        if args.target == "sam2" and not start_tracker:  # look only: 9-D pose + ranking, no tracker
+            conn.send({"cmd": "locate9", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": query,
+                       "robot_points": robot_points_head(head_b)})
+            reply = conn.recv()
+            pose9, det = reply["pose9"], reply.get("detect", {})
+            name_ok = det.get("plausible")
+        elif args.target == "sam2":
             conn.send({"cmd": "find_start", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": query,
                        "robot_points": robot_points_head(head_b)})
             reply = conn.recv()
@@ -443,6 +451,7 @@ with sim_app.launch(env_cfg, args):
     results, frames_out, latencies, perception_err = [], [], [], []
     find_log, swap = [], []
     track_err, track_status = [], {}
+    static_targets = {}  # objects whose position is fixed (fused, no tracker at home)
     kp_calib = {}
     ep_track = {"pick": [], "place": []}
     torch.inference_mode().__enter__()
@@ -487,6 +496,32 @@ with sim_app.launch(env_cfg, args):
             for i_obj, (sk, query, name) in enumerate((("pick", language.cube_ref(cube), f"cube_{cube}"),
                                                       ("place", language.plate_ref(plate, plate_colors()), f"plate_{plate}"))):
                 seed_ = args.seed * 100000 + ep * 10 + 7 + i_obj
+                if args.find_views == "fused":
+                    # Several views, no tracking during the tour; fuse the agreeing plausible detections.
+                    obs = []
+                    for v in [None] + list(VIEW_POSES):
+                        if v is not None:
+                            go_to_view(VIEW_POSES[v], head_b)
+                        p_, ok_, _ = run_find(query, name, head_b, ep, seed_, use_model=v is None, start_tracker=False)
+                        if ok_:
+                            obs.append((p_, find_log[-1].get("total") or -1e9))
+                    outcome[f"find_{sk}_attempts"] = 1 + len(VIEW_POSES)
+                    if not obs:
+                        poses[sk], ok = None, False
+                    else:
+                        pts = np.array([o[0][:3] for o in obs])
+                        agree = [[k for k in range(len(obs)) if np.linalg.norm(pts[k] - pts[j]) < 0.02] for j in range(len(obs))]
+                        group = max(agree, key=lambda g: (len(g), max(obs[k][1] for k in g)))
+                        fused = np.median(pts[group], axis=0)
+                        best = max(group, key=lambda k: obs[k][1])
+                        poses[sk] = np.concatenate([fused, obs[best][0][3:]]).astype(np.float32)
+                        outcome[f"fused_{sk}"] = (len(group), len(obs))
+                        ok = True
+                    if not ok:
+                        find_failed = True
+                        outcome["find_failed"] = query
+                        break
+                    continue
                 pose, ok, _ = run_find(query, name, head_b, ep, seed_)  # the find model's own view
                 outcome[f"find_{sk}_attempts"] = 1
                 views = list(VIEW_POSES)[: args.find_retries]
@@ -522,6 +557,21 @@ with sim_app.launch(env_cfg, args):
                     find_failed = True
                     outcome["find_failed"] = query
                     break
+            if not find_failed and args.find_views == "fused" and args.target == "sam2":
+                go_home(home_link, head_b)
+                static_targets.clear()
+                for sk, query in (("pick", language.cube_ref(cube)), ("place", language.plate_ref(plate, plate_colors()))):
+                    conn.send({"cmd": "find_start", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": query,
+                               "robot_points": robot_points_head(head_b), "prior_point": poses[sk][:3],
+                               "base_point": poses[sk][:3]})
+                    rep_ = conn.recv()
+                    if np.linalg.norm(rep_["pose9"][:3] - poses[sk][:3]) > 0.04:  # not (clearly) visible from home
+                        conn.send({"cmd": "sam2_remove", "query": query})
+                        conn.recv()
+                        static_targets[sk] = poses[sk][:3]
+                        outcome[f"static_{sk}"] = True
+                    elif query not in tracked:
+                        tracked.append(query)
             if not find_failed:
                 rot6d = {sk: v[3:] for sk, v in poses.items()}
                 if args.target != "sam2":
@@ -534,7 +584,8 @@ with sim_app.launch(env_cfg, args):
         if args.target == "sam2" and args.pipeline == "direct":
             perceived = sam2_targets("sam2_start", cube, plate, head_b)  # both objects from the home view
         if args.pipeline == "find" and not find_failed:
-            go_home(home_link, head_b, on_step=bg_track)  # both trackers keep running
+            if args.find_views != "fused":
+                go_home(home_link, head_b, on_step=bg_track)  # both trackers keep running
             if args.target == "sam2":
                 perceived = sam2_targets("sam2_update", cube, plate, head_b)
                 outcome["pick_target_start_err"] = 1000 * float(np.linalg.norm(perceived["pick"] - oracle_target("pick", cube, plate, head_b)))
