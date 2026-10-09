@@ -146,6 +146,8 @@ Pick targets freeze when the gripper is within 5 cm; place targets within 6 cm.
   paired. Without seeding, two identical 20-episode runs differed in 10/20 outcomes — use ≥ 50 episodes.
 - `--target {none, oracle, perception, sam2, oracle_tracked}`, `--push` (slide the target cube 3–6 cm over 0.5 s
   during pick), `--heldout_pairs`, `--sam2_every`.
+- Simulator episode limit (`--episode_length_s`): 2 × step_timeout + 2 s, plus 120 s for the find pipeline.
+  A time-out auto-resets the scene mid-episode; each run reports how many episodes it hit (must be 0).
 - Logs per episode: pick/place success, gripper-to-target distance and nearest cube at the first close, target
   error at close, push distance, SAM2 statuses.
 
@@ -295,6 +297,47 @@ Findings:
    - Find wrongly reports "not found" for 19/100 objects it did find. All its training failures are
      "object absent", so it never learnt partial views.
 
+### Random plate colours: retrained skills, retry vs fused find (2026-10-09; 150 seeded episodes)
+Each episode draws two plate colours from `language.PLATE_PALETTE` (`SO101_RANDOM_PLATE_COLORS=1`). The new
+models (`pick9rc`, `place9rc`, `find9rc`, 15k steps each) were trained on 2,400 random-colour pick/place episodes
+(incl. 400 failures, motion masked) + 1,200 find episodes, with empirical cube-yaw noise on the targets. The old
+models (`pick9fm`, `place9m`, `find9s`) only saw white/pink plates. Same 150 scenes in every run
+(`scripts/run_eval_randcolor2.sh`, outputs in `outputs/stage_rc_eval2/`).
+
+| Models, find | Stationary pick / full | place after pick | Push pick / full (pushed: pick / full) | grasp misses | find failed |
+|---|---|---|---|---|---|
+| old, retry views | 61 % / 42 % | 69 % | — | 32 | 25 |
+| new, retry views | 57 % / 41 % | 72 % | 28 % / 19 % (14/72, 10/72) | 35 | 28 |
+| **new, fused views** | **73 % / 45 %** | 62 % | 31 % / 22 % (15/93, 13/93) | **14** | 25 |
+
+Paired outcomes (same scenes): new vs old models, pick 19 wins / 24 losses, full 21 / 22, no difference.
+Fused vs retry find, pick **27 / 3** (sign test p < 10⁻⁵), full 20 / 14 (not significant).
+
+Findings:
+1. **Retraining on random colours did not help.** On random colours the old models drop from 79 / 52 % (white/pink)
+   to 61 / 42 %, and the retrained models score the same (57 / 41 %). The remaining gap is not the plates looking
+   new to pick/place.
+2. **Fused find is the clear pick gain** (+16 points): grasp misses fall from 35 to 14. With retry views the
+   misses close a median 68 mm away from the cube (target error at close ~0, so the gripper is not following
+   its target); with fused views 14 mm. Most of the gain is lost at place: 26 of 43 place failures are "never
+   released" (retry: 13 of 24). Cause not yet analysed.
+3. **Grasp misses are not perception yaw errors.** Target yaw error is 2–7° median for misses and ~2° for good
+   picks. The jaw-cube angle at close is 21–28° for misses. The new models also close less aligned on successful
+   picks (jaw-cube 14–17° vs 3° for the old models): the yaw noise added to training targets made them rely less
+   on the target angle.
+4. **Find fails in 1 of 6 episodes** with every variant (24–28 / 150, mostly plates), after three viewpoint
+   retries. Find's own "not found" verdict is almost never right (0–3 of 44–65 reports per run).
+5. **Pushes remain unsolved**: 15 % pick on pushed episodes. Wrong target at close (> 30 mm) in 28–44 episodes
+   per push run, so the tracker loses the cube during the slide.
+
+**Evaluation bug fixed (time-out reset).** `eval_policy.py` set the simulator episode limit to
+2 × step_timeout + 2 = 18 s, written before the find stage existed. When find + pick + place ran longer, the
+environment auto-reset mid-episode: new layout and (random colours) new plate colours, so the rest of the
+episode ran on a different scene. Find-pipeline runs now use 138 s and log `simulator time-out resets
+mid-episode`. With retry views it hit **1 / 50** episodes (2 %), so earlier find-pipeline results in this
+README hold within that margin. Fused views tour six poses and hit it in every episode; the fused numbers from
+before the fix (crashes, 147 mm targets) were this bug.
+
 ## 8. Not done yet / next steps
 - Wire in the LLM planner (Ollama qwen3-vl:8b, `skills_schema()` as the function list, validation, re-planning).
 - Full training run with the target point (current model is a 2,500-step fine-tune).
@@ -303,6 +346,11 @@ Findings:
   - add place-with-empty-gripper failures and post-release hold frames (labelled success) to the place data;
   - add "partly visible / occluded but present" find successes;
   - more varied pick-failure demos (wrong-cube grasps, edge grasps) to cut false passes.
+- Random plate colours (2026-10-09 results): make **fused find** the default (pick 73 % vs 57 %), but first find
+  why place "never releases" twice as often after a fused find (static plate target from home?).
+- Grasp alignment: the new models close 14–17° off the cube's faces (old 3°); retrain pick without yaw noise on
+  the targets (or with less), keeping the random colours.
+- Find failures (1 in 6 episodes, mostly plates) and find's unreliable "not found" verdict.
 - Place is the weakest skill (54 % after a good pick vs D2 70 %): more place data, or initialise place from D2.
 - Wire the verdicts into the planner: retry / re-find on failure.
 - ~~Train the VLA to follow moving targets~~ done in stage 1 (combined pick + place model). Separate per-skill models

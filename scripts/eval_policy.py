@@ -67,11 +67,14 @@ parser.add_argument("--verdict_from", choices=["executed", "first"], default="ex
 parser.add_argument("--fold_cube_yaw", action="store_true",
                     help="Direct pipeline with 9-D targets: give the cube's true yaw folded to [-45, 45) deg, as perception "
                          "(locate9) reports it, instead of the unfolded yaw used in training.")
+parser.add_argument("--episode_length_s", type=float, default=None,
+                    help="Simulator episode limit (auto-reset on time-out). Default: 2 * step_timeout + 2 (direct), "
+                         "+ 120 s for the find pipeline, whose find stage (and fused multi-view tour) comes on top.")
 parser.add_argument("--video_out", default="outputs/eval/episode0.mp4", help="Left-camera video of one episode.")
 parser.add_argument("--video_episode", type=int, default=0, help="Which episode to record to --video_out.")
 args, env_cfg = sim_app.parse(parser, TASK)
 env_cfg.scene.num_envs = 1
-env_cfg.episode_length_s = 2 * args.step_timeout + 2
+env_cfg.episode_length_s = args.episode_length_s or (2 * args.step_timeout + 2 + (120 if args.pipeline == "find" else 0))
 SUCCESS_FUNC = env_cfg.terminations.success.func
 if args.verdict:
     # Place must run until the model reports, so the success term never terminates; it stays registered so the
@@ -108,6 +111,15 @@ with sim_app.launch(env_cfg, args):
     torch.manual_seed(args.seed)
     env_cfg.seed = args.seed
     env = sim_app.make_env(TASK, env_cfg)
+    _env_step, time_out_resets = env.step, [0]
+
+    def _step_counting_time_outs(action):
+        """env.step that counts simulator time-out resets (they re-randomise the scene mid-episode)."""
+        out = _env_step(action)
+        time_out_resets[0] += int(bool(env.reset_time_outs[0]))
+        return out
+
+    env.step = _step_counting_time_outs
     robot = env.scene["robot"]
     gi = robot.find_bodies("gripper")[0][0]
     adapter = SO101Adapter()
@@ -457,6 +469,7 @@ with sim_app.launch(env_cfg, args):
     torch.inference_mode().__enter__()
     for ep in range(args.episodes):
         env.reset()
+        ep_time_outs0 = time_out_resets[0]
         ep_track["pick"].clear(); ep_track["place"].clear()
         if args.kp_calib_mm > 0 or args.kp_calib_deg > 0:
             kr = np.random.default_rng(args.seed * 7919 + ep)
@@ -716,6 +729,7 @@ with sim_app.launch(env_cfg, args):
                 continue
             if done or (skill == "pick" and not outcome["pick"]):
                 break
+        outcome["time_out_resets"] = time_out_resets[0] - ep_time_outs0
         results.append(outcome)
         close = outcome["close"]
         close_txt = (f"close: target dxy={close[0]:.0f}mm dz={close[1]:+.0f}mm nearest={close[2]}" if close else "never closed")
@@ -783,6 +797,9 @@ with sim_app.launch(env_cfg, args):
     full = sum(r["place"] for r in results)
     print(f"[eval] pick success {pick}/{n} = {pick / n:.0%}; full pick+place {full}/{n} = {full / n:.0%}; "
           f"mean server latency {1000 * np.mean(latencies):.0f} ms")
+    to = [r["time_out_resets"] for r in results]
+    print(f"[eval] simulator time-out resets mid-episode: {sum(t > 0 for t in to)}/{n} episodes "
+          f"(episode limit {env_cfg.episode_length_s:.0f} s)")
     if find_log:
         for kind in ("cube", "plate"):
             fl = [f for f in find_log if kind in f["obj"]]
