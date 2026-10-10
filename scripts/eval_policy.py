@@ -47,6 +47,10 @@ parser.add_argument("--target_dim", type=int, choices=[3, 9], default=9,
                     help="Target sent to the policy: 3 = position, 9 = position + 6-D rotation (19-D state models).")
 parser.add_argument("--freeze_radius", type=float, default=0.03,
                     help="Pick target stops updating once the TCP is this close to it [m] (and when the gripper closes).")
+parser.add_argument("--place_release", choices=["hold", "open"], default="hold",
+                    help="After a place success verdict, the 0.5 s hold before scoring keeps the last command (hold) or "
+                         "commands the gripper open at the same pose (open). The place model's success label starts "
+                         "just before the release in the demos, so it can report success with the cube still held.")
 parser.add_argument("--home_grip", choices=["keep", "closed"], default="closed",
                     help="Gripper during the scripted return home after find(): closed = the pick start state seen in "
                          "training; keep = whatever opening find() left.")
@@ -697,6 +701,8 @@ with sim_app.launch(env_cfg, args):
                             and float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) < rest_z + 0.01):
                         outcome["dropped"] = t  # the cube is back on the table before any release command
                     if skill == "pick" and lifted:
+                        if not outcome["pick"]:
+                            outcome["pick_lift_t"] = t * env.step_dt
                         outcome["pick"] = True
                     if term[0] or trunc[0]:
                         # The env has already reset: read the success term's value from this step, not the new layout.
@@ -712,10 +718,15 @@ with sim_app.launch(env_cfg, args):
                         break
                 if skill == "pick" and outcome["pick"] and not args.verdict:
                     break
+            outcome[f"{skill}_t"] = t * env.step_dt  # time this skill ran
             if args.verdict:
                 if not done:  # hold the last command 0.5 s (as the robot does after a verdict), then check the truth
+                    hold = a.clone()
+                    if skill == "place" and vd.result is True and args.place_release == "open":
+                        hold[9] = 1.0  # success means "release": open at the same pose
+                        outcome["release_forced"] = outcome.get("release") is None
                     for _ in range(10):
-                        env.step(adapter.ik_command(a.unsqueeze(0), head_b))
+                        env.step(adapter.ik_command(hold.unsqueeze(0), head_b))
                 lifted = float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) > rest_z + 0.03
                 if skill == "place":
                     c = env.scene[cube_name].data.root_pos_w.torch[0]
@@ -743,6 +754,12 @@ with sim_app.launch(env_cfg, args):
         if args.verdict:
             close_txt += " | verdicts " + " ".join(f"{sk}={outcome[f'{sk}_verdict'][0]}/{outcome[f'{sk}_verdict'][1]}"
                                                      for sk in ("pick", "place") if f"{sk}_verdict" in outcome)
+            close_txt += " | time " + " ".join(f"{sk} {outcome[f'{sk}_t']:.1f}s" for sk in ("pick", "place")
+                                               if f"{sk}_t" in outcome)
+            if outcome.get("pick_lift_t") is not None:
+                close_txt += f" (lifted at {outcome['pick_lift_t']:.1f}s)"
+            if outcome.get("release_forced"):
+                close_txt += " | release forced after place verdict"
         if outcome["pick"] and not outcome["place"]:
             r = outcome.get("release")
             if outcome.get("dropped") is not None:

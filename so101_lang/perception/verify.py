@@ -21,6 +21,11 @@ The candidate with the highest sum of log-terms is returned, with its terms. "No
 
 from __future__ import annotations
 
+import functools
+import json
+import os
+from pathlib import Path
+
 import numpy as np
 import torch
 
@@ -131,8 +136,56 @@ def measure_size(calib: dict, depth: np.ndarray, box, robot_points=None, robot_r
     return height, width
 
 
+# Learned colour model (SO101_COLOR_MODEL=learned; default "rule" = the hand-set HSV rules below, until evaluated). One Gaussian in CIELab
+# per (colour name, object kind) plus the table, fitted on rendered pixels of the training data
+# (scripts/fit_color_model.py). A pixel's score for a name is its posterior over all names (equal priors), 0 when
+# it fits no component (chi-square 99.9 %): the requested colour only has to look more like itself than like the
+# other names under this lighting, which washes every colour towards pastel.
+COLOR_MODEL_PATH = Path(__file__).with_name("color_model.json")
+COLOR_GATE = {"learned": 0.25, "rule": 0.15}  # plausibility threshold on the colour term
+
+
+def color_mode() -> str:
+    return os.environ.get("SO101_COLOR_MODEL", "rule")
+
+
+@functools.lru_cache(maxsize=1)
+def _color_model():
+    m = json.loads(COLOR_MODEL_PATH.read_text())
+    keys = list(m["components"])
+    mus = np.array([m["components"][k]["mean"] for k in keys])
+    cinv = np.array([np.linalg.inv(m["components"][k]["cov"]) for k in keys])
+    logdet = np.array([np.log(np.linalg.det(m["components"][k]["cov"])) for k in keys])
+    names = sorted({k.split("|")[0] for k in keys})
+    member = np.array([[k.split("|")[0] == n for k in keys] for n in names])  # (names, components)
+    return names, mus, cinv, logdet, member, m["outlier_m2"]
+
+
+def color_posterior(rgb_pixels: np.ndarray) -> dict[str, float]:
+    """Mean posterior over the learned colour names (and "table") of the pixels (N, 3 uint8)."""
+    import cv2
+
+    names, mus, cinv, logdet, member, out_m2 = _color_model()
+    x = cv2.cvtColor(rgb_pixels.reshape(-1, 1, 3).astype(np.uint8), cv2.COLOR_RGB2LAB).reshape(-1, 3).astype(float)
+    d = x[None] - mus[:, None]  # (components, N, 3)
+    m2 = np.einsum("kni,kij,knj->kn", d, cinv, d)
+    ll = -0.5 * m2 - 0.5 * logdet[:, None]
+    L = np.stack([ll[mem].max(0) for mem in member])  # best component per name
+    p = np.exp(L - L.max(0))
+    p /= p.sum(0)
+    p[:, m2.min(0) > out_m2] = 0.0
+    return {n: float(v) for n, v in zip(names, p.mean(1))}
+
+
 def color_similarity(rgb_pixels: np.ndarray, color: str) -> float:
-    """Mean similarity of the pixels (N, 3 uint8) to a basic colour name, in [0, 1]."""
+    """Similarity of the pixels (N, 3 uint8) to a colour name, in [0, 1]: learned posterior, or the HSV rule."""
+    if color_mode() == "learned" and color in _color_model()[0]:
+        return color_posterior(rgb_pixels)[color]
+    return color_similarity_rule(rgb_pixels, color)
+
+
+def color_similarity_rule(rgb_pixels: np.ndarray, color: str) -> float:
+    """Mean similarity of the pixels (N, 3 uint8) to a basic colour name, in [0, 1] (hand-set HSV rules)."""
     import cv2
 
     hsv = cv2.cvtColor(rgb_pixels.reshape(-1, 1, 3).astype(np.uint8), cv2.COLOR_RGB2HSV).reshape(-1, 3).astype(float)
@@ -217,7 +270,7 @@ def detect_ranked(locator, rgb: np.ndarray, query: str, depth: np.ndarray | None
     info = {"terms": {"det": round(score, 3), "noun": round(float(1 / (1 + np.exp(-logits[i, 1]))), 3),
                       "size": round(s_lik, 3), "color": round(c_sim, 3)},
             "size_m": None if size_m is None else [round(size_m[0], 4), round(size_m[1], 4)],
-            "plausible": bool(s_lik > 0.3 and (c_sim > 0.15 or not colors)),
+            "plausible": bool(s_lik > 0.3 and (c_sim > COLOR_GATE[color_mode()] or not colors)),
             "rank_by_detector": cands.index(i), "n_candidates": len(cands),
             "margin": round(float(total - rows[1][0]), 2) if len(rows) > 1 else None, "total": round(float(total), 3)}
     return boxes[i], score, info
