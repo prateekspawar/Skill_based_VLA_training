@@ -37,7 +37,8 @@ Design goals (from the project owner):
                   output : 50-step chunk of 12-D actions = TCP pose + gripper opening + [done, success]
                   first 10 actions executed per query (~120 ms), then re-query; SAM2 updates the target every
                   3 steps, the pick target freezes within 3 cm of the gripper. A skill ends when done > 0.5 on
-                  2 consecutive current-frame readings, or after 8 s.
+                  2 consecutive current-frame readings, or after 16 s; after a place
+                  success the executor opens the gripper (`--place_release open`).
         │ 10-D head-frame action
         ▼
  ⑤ SO101Adapter   head → base calibration, TCP offset, gripper opening → joint angle (so101_lang/robots/so101.py)
@@ -48,7 +49,8 @@ Design goals (from the project owner):
 **Perception** (`so101_lang/perception/`, runs in the policy server):
 1. OWLv2 proposes candidate boxes for the request ("red cube") and for the noun.
 2. **Ranked detection** (`verify.py`) scores each box: detector score for request and noun, soft stereo size
-   likelihood, colour similarity of the object's own pixels. The best box wins.
+   likelihood, and the learned colour posterior of the object's own pixels (`color_model.json`: how much more it
+   looks like the requested colour than like any other colour name). The best box wins.
 3. **Plausibility gate:** the winner must fit the request in size and colour; otherwise find looks again.
 4. 3-D point from the mask + Fast-FoundationStereo depth (TensorRT FP16, ~9 ms, ~2 mm error), arm pixels removed
    with robot keypoints from FK (8 mm / 1° hand-eye error simulated). Yaw from the top face, folded by the
@@ -139,7 +141,7 @@ Training phrasings and held-out phrasings per skill are defined there; `HELDOUT_
 
 ## 6. Evaluation (`scripts/eval.sh` → `scripts/eval_policy.py` + `serve/policy_server.py`)
 - `eval_policy.py` defaults are the current pipeline: find → pick → place, fused find, 9-D SAM2 targets,
-  verdict-ended skills (current frame), 8 s per skill, 50 episodes.
+  verdict-ended skills (current frame), 16 s per skill, gripper opened after a place success, 50 episodes.
 - Seeded: layouts, pushes and the VLA's sampling noise (per episode and skill) are reproducible, so variants are
   paired. Without seeding, two identical 20-episode runs differed in 10/20 outcomes — use ≥ 50 episodes.
 - `--push` slides the target cube 3–6 cm over 0.5 s during pick. Variants: `--find_views retry|all|fused`,
@@ -338,21 +340,50 @@ mid-episode`. With retry views it hit **1 / 50** episodes (2 %), so earlier find
 README hold within that margin. Fused views tour six poses and hit it in every episode; the fused numbers from
 before the fix (crashes, 147 mm targets) were this bug.
 
+### Fixes from the failure analysis (2026-10-10; fused find, 150 seeded episodes, same scenes)
+Each fix alone on stationary scenes, then all three together (now the defaults):
+
+| Variant | Stationary pick / full | place after pick | find failed | Push pick / full (pushed: pick) |
+|---|---|---|---|---|
+| 9 Oct baseline: 8 s per skill, HSV colour rule | 73 % / 45 % | 62 % | 25 | 31 % / 22 % (15/93) |
+| 16 s per skill | 75 % / 57 % | 76 % | 24 | — |
+| 16 s + open the gripper after a place success verdict | 75 % / 64 % | 86 % | 24 | — |
+| learned colour model (8 s) | 85 % / 55 % | 65 % | 4 | — |
+| **all three (defaults)** | **86 % / 72 %** | **84 %** | 6 | 35 % / 33 % (20/109) |
+
+Paired full-success wins / losses vs the previous row's base: 16 s 24 / 7, forced release 18 / 7, colour model
+26 / 11 (pick 23 / 5). Seeded reruns still differ in ~8 % of pick outcomes (GPU non-determinism), so differences of
+a few episodes are noise.
+
+Findings:
+1. **"Never released" was mostly timing and labels, not the place model.** Of 26 (fused, 8 s): 11 were a good pick
+   whose verdict came too late (cube lifted within 4 s, but the "done" reading lagged > 3 s in 15 episodes), so
+   place never ran; 5 were place running out of 8 s; 9 were place reporting success before opening.
+2. **The place success label sat before the release.** Demos ended when the success term first fired, with the
+   gripper ~27 % open; the last-5-frames success label covered closed-gripper frames, so the model says "success"
+   just before releasing. Executor workaround: `--place_release open` (default). Data fix: `gen_demos
+   --post_release_frames 5` records through the retreat; new demos `rc2_*` are being generated.
+3. **Plate colour failures were the hand-set colour rules.** Brown failed 94 % of finds: the bright lighting renders
+   brown as light tan, which the HSV rule scored 0.00; orange scored higher as yellow, pink as white. The learned
+   model (`perception/color_model.json`, `scripts/fit_color_model.py`) scores a candidate by its posterior over all
+   colour names (plus table / outlier classes), fitted on rendered training pixels. Brown finds 19 → 0 failures.
+4. Remaining stationary failures (42): released off the plate 12, find failed 6, pick misses ~15, never released 4.
+   Push: pick on pushed episodes 20/109 — the tracker / pick under motion is now the largest gap.
+
 ## 8. Not done yet / next steps
-Current best (random plate colours, 150 episodes): stationary pick 73 % / full 45 %, push 31 % / 22 %.
-Stationary failures: place after a good pick 43 (26 never released), find failed 25, pick ~14.
-1. **Place "never releases"** (largest loss, twice as often after fused find): diagnose from the logs; suspect the
-   static plate target when the plate is hidden from home.
-2. **Find failures** (1 in 6 episodes, mostly plates): break down by plate colour; drop or re-prompt colours the
-   detector handles badly.
-3. **One combined retrain:** pick without yaw noise on the targets (new models close 14–17° off the cube faces vs
-   3° before); place data with an empty gripper and post-release hold frames; find successes on partly hidden
-   objects (find's "not found" verdict is almost never right).
-4. **Pushes regressed** (pushed-episode pick 15/93 vs 18/43 for the combined stage-1 model): faster-following
-   tracker (1 cm deadband) with fused find, compared against `d2_pointmap_20000`.
-5. **Wire in the LLM planner** (Ollama qwen3-vl:8b, `skills_schema()` as the function list, validation,
-   re-planning) and let it act on the verdicts (retry / re-find on failure).
-6. Real robot: hand-eye calibration of the head (`head_in_base`), standalone IK, real stereo camera.
+Current best (defaults, random plate colours, 150 episodes): stationary pick 86 % / full 72 %, push 35 % / 33 %.
+1. **Retrain** (decision pending) with the post-release place demos (`rc2_*`, generating), so place reports success
+   after releasing and the forced release can go; optionally pick without yaw noise on the targets (new models close
+   14–17° off the cube faces vs 3° before).
+2. **Pushes:** pick on pushed episodes 18 %. Faster-following tracker (1 cm deadband) with fused find, compared
+   against `d2_pointmap_20000` (combined stage-1 model: 18/43).
+3. **Place accuracy:** "released off the plate" (12 / 150) is now the largest place failure.
+4. **Verdicts:** find's "not found" is never right (0 of 61); place verdict 76 % accurate. Add partly-visible find
+   successes and place-with-empty-gripper failures to the data.
+5. **Blue cube not proposed by the detector** in some views (find picks the green cube, correctly rejected).
+6. **Wire in the LLM planner** (Ollama qwen3-vl:8b, `skills_schema()`), acting on the verdicts.
+7. Real robot: hand-eye calibration of the head (`head_in_base`), standalone IK, real stereo camera; refit the
+   colour model on real images.
 
 ## 9. File map
 ```
