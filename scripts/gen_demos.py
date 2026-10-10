@@ -37,8 +37,27 @@ parser.add_argument("--move_prob_pick", type=float, default=0.0,
                     help="Probability that the target cube slides 3-6 cm during the pick approach.")
 parser.add_argument("--move_prob_place", type=float, default=0.0,
                     help="Probability that the target plate slides 3-6 cm while the cube is carried.")
+parser.add_argument("--post_release_frames", type=int, default=5,
+                    help="Keep recording after the release until the expert has retreated (gripper open, above the "
+                         "plate) and the cube has stayed on the plate this many frames; these last frames carry "
+                         "the success label. 0 = old behaviour: the episode ends when the cube first rests on the "
+                         "plate, mid-release (gripper ~27 %% open).")
 args, env_cfg = sim_app.parse(parser, TASK)
 env_cfg.seed = args.seed
+if args.post_release_frames > 0:
+    import functools
+
+    _on_plate = env_cfg.terminations.success.func
+
+    def _success_after_retreat(env, *a, **kw):
+        """Success term that fires only after the retreat with the cube still on the plate."""
+        ok = _on_plate(env, *a, **kw) & (expert.phase == 8)  # Phase.DONE (expert defined below)
+        run = getattr(env, "_post_release_run", None)
+        run = (run + 1) * ok if run is not None else ok.int()
+        env._post_release_run = run
+        return run >= args.post_release_frames
+
+    env_cfg.terminations.success.func = functools.update_wrapper(_success_after_retreat, _on_plate)
 
 with sim_app.launch(env_cfg, args):
     import json
