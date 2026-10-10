@@ -2,7 +2,7 @@
 
 Defaults = the current pipeline: per episode find(cube), find(plate) (fused multi-view find), then pick and
 place with 9-D SAM2-tracked targets; each skill ends on the model's own [done, success] verdict read from the
-current frame (8 s limit), and every verdict is scored against the simulator. Start the server first:
+current frame (16 s limit; after a place success the gripper is opened), and every verdict is scored against the simulator. Start the server first:
 
     ~/lerobot-env/bin/python -m so101_lang.serve.policy_server          # current skill models by default
     OMNI_KIT_ACCEPT_EULA=YES ~/isaacsim/bin/python scripts/eval_policy.py --episodes 150 --seed 0 [--push]
@@ -20,7 +20,7 @@ TASK = "SO101-PickPlace-Lang-IK-v0"
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--episodes", type=int, default=50)
 parser.add_argument("--exec_steps", type=int, default=10, help="Actions executed from each predicted chunk.")
-parser.add_argument("--step_timeout", type=float, default=8.0, help="Seconds allowed per skill.")
+parser.add_argument("--step_timeout", type=float, default=16.0, help="Seconds allowed per skill.")
 parser.add_argument("--port", type=int, default=6000)
 parser.add_argument("--heldout_pairs", action="store_true", help="Sample only the held-out (cube, plate) pairs.")
 parser.add_argument("--target", choices=["none", "oracle", "perception", "sam2", "oracle_tracked"], default="sam2",
@@ -47,7 +47,7 @@ parser.add_argument("--target_dim", type=int, choices=[3, 9], default=9,
                     help="Target sent to the policy: 3 = position, 9 = position + 6-D rotation (19-D state models).")
 parser.add_argument("--freeze_radius", type=float, default=0.03,
                     help="Pick target stops updating once the TCP is this close to it [m] (and when the gripper closes).")
-parser.add_argument("--place_release", choices=["hold", "open"], default="hold",
+parser.add_argument("--place_release", choices=["hold", "open"], default="open",
                     help="After a place success verdict, the 0.5 s hold before scoring keeps the last command (hold) or "
                          "commands the gripper open at the same pose (open). The place model's success label starts "
                          "just before the release in the demos, so it can report success with the cube still held.")

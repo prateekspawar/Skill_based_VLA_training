@@ -136,7 +136,7 @@ def measure_size(calib: dict, depth: np.ndarray, box, robot_points=None, robot_r
     return height, width
 
 
-# Learned colour model (SO101_COLOR_MODEL=learned; default "rule" = the hand-set HSV rules below, until evaluated). One Gaussian in CIELab
+# Learned colour model (default; SO101_COLOR_MODEL=rule for the hand-set HSV rules below). One Gaussian in CIELab
 # per (colour name, object kind) plus the table, fitted on rendered pixels of the training data
 # (scripts/fit_color_model.py). A pixel's score for a name is its posterior over all names (equal priors), 0 when
 # it fits no component (chi-square 99.9 %): the requested colour only has to look more like itself than like the
@@ -146,7 +146,7 @@ COLOR_GATE = {"learned": 0.25, "rule": 0.15}  # plausibility threshold on the co
 
 
 def color_mode() -> str:
-    return os.environ.get("SO101_COLOR_MODEL", "rule")
+    return os.environ.get("SO101_COLOR_MODEL", "learned")
 
 
 @functools.lru_cache(maxsize=1)
