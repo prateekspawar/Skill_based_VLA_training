@@ -173,8 +173,12 @@ def main():
 
                             # SAM2_DEADBAND [m]: published target moves only once the tracked point moved this far
                             # SAM2_MODE: "state" (locked / following on trusted measurements, default) or "deadband"
+                            # SAM2_MOVE_THR [m] / SAM2_MOVE_CONFIRM: state tracker switches to following after this
+                            # many consistent trusted measurements this far from its reference
                             sam2 = Sam2MultiTracker(locator, deadband=float(os.environ.get("SAM2_DEADBAND", 0.025)),
-                                                    mode=os.environ.get("SAM2_MODE", "state"))
+                                                    mode=os.environ.get("SAM2_MODE", "state"),
+                                                    move_thr=float(os.environ.get("SAM2_MOVE_THR", 0.015)),
+                                                    move_confirm=int(os.environ.get("SAM2_MOVE_CONFIRM", 2)))
                             print(f"[server] SAM2 tracker mode {sam2.kwargs['mode']}", flush=True)
                         robot_points = msg.get("robot_points")  # robot keypoints (head frame) for the self-filter
                         if msg["cmd"] == "sam2_reset":

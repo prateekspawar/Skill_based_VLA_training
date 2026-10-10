@@ -663,6 +663,7 @@ with sim_app.launch(env_cfg, args):
                         d = torch.linalg.norm(cubes[:, :2] - tcp[:2], dim=1)
                         near = int(torch.argmin(d))
                         outcome["close"] = (1000 * float(d[cube]), 1000 * float(tcp[2] - cubes[cube, 2]), language.CUBE_NAMES[near])
+                        outcome["close_t"] = t * env.step_dt
                         st = state_now(head_b)[0].cpu().numpy()
                         outcome["close_yaw"] = yaw_err_deg(st[:9], truth_pose9(f"cube_{cube}", head_b), head_b, True)
                         if target is not None:
@@ -684,6 +685,7 @@ with sim_app.launch(env_cfg, args):
                         if push["steps_left"] == 0:  # slide finished: measure the actual displacement
                             moved = env.scene[cube_name].data.root_pos_w.torch[0] - push["start"]
                             outcome["push_mm"] = 1000 * float(torch.linalg.norm(moved[:2]))
+                            outcome["push_end_t"] = t * env.step_dt
                             rest_z = float(env.scene[cube_name].data.root_pos_w.torch[0, 2])
                             if args.target == "sam2":
                                 outcome["sam2_err_after_push"] = 1000 * float(np.linalg.norm(
@@ -694,6 +696,10 @@ with sim_app.launch(env_cfg, args):
                         tcp_h = state_now(head_b)[0, :3].cpu().numpy()
                         frozen = ("pick",) if np.linalg.norm(tcp_h - perceived["pick"]) < args.freeze_radius else ()
                         perceived = sam2_targets("sam2_update", cube, plate, head_b, frozen + ("place",))
+                    if (args.target == "sam2" and skill == "pick" and outcome.get("push_end_t") is not None
+                            and outcome.get("caught_up_t") is None and outcome["close"] is None
+                            and np.linalg.norm(perceived["pick"] - oracle_target("pick", cube, plate, head_b)) < 0.015):
+                        outcome["caught_up_t"] = t * env.step_dt  # tracked target back within 15 mm after the push
                     if ep == args.video_episode:
                         frames_out.append(rgb("left_cam"))
                     lifted = float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) > rest_z + 0.03
@@ -749,6 +755,10 @@ with sim_app.launch(env_cfg, args):
         close_txt = (f"close: target dxy={close[0]:.0f}mm dz={close[1]:+.0f}mm nearest={close[2]}" if close else "never closed")
         if outcome["push_mm"]:
             close_txt += f" | pushed {outcome['push_mm']:.0f}mm"
+            if outcome.get("push_end_t") is not None:
+                fmt = lambda x: "never" if x is None else f"{x:.1f}s"
+                close_txt += (f" (push end {fmt(outcome['push_end_t'])}, target caught up "
+                              f"{fmt(outcome.get('caught_up_t'))}, close {fmt(outcome.get('close_t'))})")
         if outcome.get("target_err_at_close") is not None:
             close_txt += f" | target err at close {outcome['target_err_at_close']:.0f}mm"
         if args.verdict:
