@@ -214,8 +214,9 @@ class EventsCfg:
             "pairs": language.train_pairs(),
         },
     )
-    if os.environ.get("SO101_RANDOM_PLATE_COLORS") == "1":
-        # Per-episode plate colours from language.PLATE_PALETTE (names in env.pp_plate_colors).
+    if os.environ.get("SO101_RANDOM_PLATE_COLORS", "1") != "0" and not os.environ.get("SO101_PLATE_COLORS"):
+        # Per-episode plate colours from language.PLATE_PALETTE (names in env.pp_plate_colors). Default on;
+        # SO101_RANDOM_PLATE_COLORS=0 gives the fixed white/pink plates, SO101_PLATE_COLORS a fixed override.
         randomize_plate_colors = EventTerm(
             func=mdp.randomize_plate_colors, mode="reset", params={"palette": language.PLATE_PALETTE}
         )

@@ -14,55 +14,68 @@ Design goals (from the project owner):
 ## 1. Architecture (as used now)
 
 ```
- user goal: "put the red cube on the pink plate"
+ user goal: "put the red cube on the green plate"
         │
         ▼
- ┌──────────────────────────────┐   NOT YET WIRED IN. Evaluation currently uses an *oracle planner*
- │ Planner LLM (Ollama,         │   (scripts/eval_policy.py) that emits the two skills for the episode.
- │ qwen3-vl:8b)                 │   Function list = language.skills_schema().
- │ → [pick(object="red cube"),  │
- │    place(target="pink plate")]│
- └──────────────┬───────────────┘
-                │ per skill: step text  "pick up the red cube"  +  object name
-                ▼
- ┌──────────────────────────────┐   so101_lang/perception/
- │ Perception                    │   • OWLv2 (open-vocab detector) finds the named object in the LEFT image
- │  stereo pair ─► FFS depth     │   • Fast-FoundationStereo (TensorRT FP16, 320 px, ~9 ms) → metric depth
- │  ─► target 3-D point          │   • box/mask pixels + depth → 3-D point in the HEAD frame
- │  (head frame)                 │   • targets: static (once at episode start)  or  SAM2 tracking
- └──────────────┬───────────────┘
-                │ target point (x, y, z)
-                ▼
- ┌──────────────────────────────┐   SmolVLA (450 M, LeRobot 0.6.1) via plugin "smolvla_depth"
- │ VLA executor                  │   inputs : left + right 512² images, step text,
- │                               │            13-D state = TCP pose (pos + rot6d) + gripper opening + target xyz
- │                               │   output : 50-step chunk of 10-D actions (TCP pose + gripper opening),
- │                               │            head frame, learned as offsets from the current state
- └──────────────┬───────────────┘   (first 10 actions executed per query, then re-query)
-                │ 10-D head-frame action
-                ▼
- ┌──────────────────────────────┐   so101_lang/robots/so101.py
- │ SO101Adapter (robot-specific) │   head→base calibration, TCP offset on the gripper link,
- │                               │   gripper opening → joint angle
- └──────────────┬───────────────┘
-                ▼
+ ① Planner        NOT WIRED IN YET. Evaluation uses an oracle planner (scripts/eval_policy.py) that emits
+                  find(cube), find(plate), pick(cube), place(plate). Function list for the LLM (Ollama
+                  qwen3-vl:8b): language.skills_schema().
+        │
+        ▼
+ ② find(object)   per object:
+                  a. find skill model moves the arm until it judges the view clear (own verdict, ≤ 6 s)
+                  b. perception: 9-D pose of the object (position + rot6d, head frame)
+                  c. fused (default): b again from 3 preset viewing poses (up_back, right_low, back_low) with all
+                     trackers paused; the plausible detections that agree within 2 cm → median position
+                  d. back home: a SAM2 tracker per object, anchored at the fused position
+                     (object not visible from home → its position stays static)
+        │ target pose (9-D) per skill
+        ▼
+ ③ pick  ④ place  skill models on one shared frozen SmolVLA backbone
+                  inputs : left + right 512² images, point-map tokens (stereo depth), step text,
+                           19-D state = TCP pose (10-D) + target pose (9-D)
+                  output : 50-step chunk of 12-D actions = TCP pose + gripper opening + [done, success]
+                  first 10 actions executed per query (~120 ms), then re-query; SAM2 updates the target every
+                  3 steps, the pick target freezes within 3 cm of the gripper. A skill ends when done > 0.5 on
+                  2 consecutive current-frame readings, or after 8 s.
+        │ 10-D head-frame action
+        ▼
+ ⑤ SO101Adapter   head → base calibration, TCP offset, gripper opening → joint angle (so101_lang/robots/so101.py)
+        ▼
    SO-101 pose IK (Isaac Lab damped least squares, 5 arm joints) → joint targets → simulated robot
 ```
+
+**Perception** (`so101_lang/perception/`, runs in the policy server):
+1. OWLv2 proposes candidate boxes for the request ("red cube") and for the noun.
+2. **Ranked detection** (`verify.py`) scores each box: detector score for request and noun, soft stereo size
+   likelihood, colour similarity of the object's own pixels. The best box wins.
+3. **Plausibility gate:** the winner must fit the request in size and colour; otherwise find looks again.
+4. 3-D point from the mask + Fast-FoundationStereo depth (TensorRT FP16, ~9 ms, ~2 mm error), arm pixels removed
+   with robot keypoints from FK (8 mm / 1° hand-eye error simulated). Yaw from the top face, folded by the
+   object's symmetry (`language.YAW_SYMMETRY_DEG`: cube 90°).
+5. **SAM2 tracker, state-based:** *locked* publishes the clear-view detection; switches to *following* only after
+   two consistent trusted measurements > 1.5 cm away; locks again once still. Trusted = mask 0.7–1.4× its find
+   size and < 15 % of its pixels on the robot.
 
 Process layout (two Python environments that talk over a local socket):
 
 | Process | Environment | Runs |
 |---|---|---|
 | Simulator + evaluation loop | `~/isaacsim` (Isaac Sim 6.1, Isaac Lab 3.0) | `scripts/eval_policy.py`, environment, adapter, IK |
-| Policy server | `~/lerobot-env` (LeRobot 0.6.1, PyTorch 2.11 cu130, TensorRT 10.16) | `so101_lang/serve/policy_server.py`: VLA, OWLv2, SAM2, stereo depth |
+| Policy server | `~/lerobot-env` (LeRobot 0.6.1, PyTorch 2.11 cu130, TensorRT 10.16) | `so101_lang/serve/policy_server.py`: skill models (shared 350 M backbone + 101 M per skill, 0.8 ms swap), OWLv2, SAM2.1-small, Fast-FoundationStereo |
 | Planner LLM (not wired in yet) | Ollama in `~/.local/ollama` | `qwen3-vl:8b` |
+
+Current models: `checkpoints/{pick,place,find}9rc_15000` (served by default). Old white/pink-plate models for
+comparison: `pick9fm_15000`, `place9m_15000`, `find9s_15000`. Earlier combined pick+place model (13-D state,
+best push result): `d2_pointmap_20000`.
 
 ### Frames and conventions
 - **Head frame:** origin midway between the two optical centres, +X forward (viewing direction), +Y left,
-  +Z up. All VLA state, actions and target points are in this frame. Quaternions are xyzw.
+  +Z up. All VLA state, actions and target poses are in this frame. Quaternions are xyzw.
 - **TCP:** grasp point between the jaw pads = gripper link + (0.009, 0, -0.090) m in the gripper-link frame.
-- **10-D state/action:** `[tcp.x, tcp.y, tcp.z, r11, r21, r31, r12, r22, r32, gripper.open]`
-  (rotation as the first two matrix columns; gripper 0 = closed, 1 = open). The 13-D state adds `target.x/y/z`.
+- **10-D TCP state/action:** `[tcp.x, tcp.y, tcp.z, r11, r21, r31, r12, r22, r32, gripper.open]`
+  (rotation as the first two matrix columns; gripper 0 = closed, 1 = open). Skill models add the 9-D target pose
+  (find gets zeros) to the state and `[done, success]` to the action.
 - **Relative actions:** the first 9 action dims are trained as `action_norm − state_norm` and the state is added
   back at inference (`relative_action_dims=9`); exactly invertible.
 
@@ -70,29 +83,16 @@ Process layout (two Python environments that talk over a local socket):
 | Skill | Parameter (allowed values) | Canonical step text |
 |---|---|---|
 | `pick` | `object`: red / green / blue / yellow cube | "pick up the {object}" |
-| `place` | `target`: white / pink plate | "place it on the {target}" |
+| `place` | `target`: {colour} plate, colours from `PLATE_PALETTE` (white, pink, red, blue, green, yellow, orange, purple, brown) | "place it on the {target}" |
 | `find` | `object`: any cube or plate | "find the {object}" |
 
-### Skill models and the pass/fail verdict
-- One model per skill (pick, place, find) on a **shared frozen SmolVLA backbone**; the server swaps only the
-  ~100 M trainable tensors (`serve/skills.py`, `policy_server --skills pick=... place=... find=...`).
-- State is 19-D: 10-D TCP + 9-D target pose (position + rot6d, head frame; find gets zeros). Yaw is not folded.
-- **Action is 12-D:** 10-D TCP command + `[done, success]` (`data/status.py`): running `[0,0]`, succeeded `[1,1]`
-  (last 5 frames of a successful skill), failed `[1,0]` (from failure detection on; the robot then holds still).
-  The executor ends a skill when `done > 0.5` for 2 consecutive actions and passes the verdict to the
-  orchestrator. A failed verdict means stop and hold still.
-- Timeouts are judged by the executor (skill time limit / no progress). A memoryless policy cannot tell
-  "stuck for 3 s" from "just started", so no stall demos are generated.
-- Failure demos come from the expert with injected errors; the outcome is checked in the simulator:
-  - pick: grasp miss (2–3.5 cm offset), slip (gripper opens while lifting);
-  - place: released 9–12 cm off the plate, dropped during the carry (`scripts/gen_fail_demos.py`);
-  - find: target absent, i.e. the object is moved out of view (`gen_find_demos.py --absent_prob`).
-- Pipeline: `scripts/run_stage_verdict.sh`. Data:
-  - 2000 success episodes plus 400 pick/place failures → `s512_all9s` → `s512_pick9s` / `s512_place9s`;
-  - 1000 find successes plus 200 absent → `s512_find9s`.
-- Eval: `eval_policy.py --verdict` scores every verdict against simulator truth.
-
 Training phrasings and held-out phrasings per skill are defined there; `HELDOUT_PAIRS` = (yellow, pink), (green, white).
+
+### Pass/fail verdict
+- `[done, success]` per action (`data/status.py`): running `[0,0]`, succeeded `[1,1]` (last 5 frames of a
+  successful skill), failed `[1,0]` (from failure detection on; the robot then holds still).
+- A failed verdict or a timeout stops the episode (hold still). The orchestrator does not act on verdicts yet.
+- Timeouts are judged by the executor: a memoryless policy cannot tell "stuck for 3 s" from "just started".
 
 ---
 
@@ -100,66 +100,66 @@ Training phrasings and held-out phrasings per skill are defined there; `HELDOUT_
 - Task `SO101-PickPlace-Lang-IK-v0` (IK-controlled) and `SO101-PickPlace-Lang-Joint-v0` (joint-controlled, unused now).
 - Scene: Isaac Lab's SO-101 (`so101_new_calib`) seated on a table, 4 coloured 3 cm cubes, 2 plates; random
   non-overlapping layout and (cube, plate) task per episode.
+- **Plate colours:** two distinct colours from `PLATE_PALETTE` per episode (default; it includes the cube colours).
+  `SO101_RANDOM_PLATE_COLORS=0` gives the fixed white/pink plates, `SO101_PLATE_COLORS=red,blue` a fixed override.
 - **Stereo head:** two parallel 512×512 pinhole cameras, 6 cm baseline, 32 mm focal length (~36° FOV),
   centre at (−0.12, 0.20, 0.45) m looking at (0.21, −0.01, 0) — over the arm's "left shoulder".
   Calibration (intrinsics, head-in-base) is saved with every dataset as `meta/stereo_calibration.json`.
 - Success: target cube resting on the target plate, gripper open, cube nearly still.
 
-## 3. Data (`scripts/gen_demos.py`, `so101_lang/expert/`, `so101_lang/data/`)
+## 3. Data (`scripts/run_stage_randcolor.sh`: generation → training, resumable)
 - **Scripted expert** (`expert/pick_place_sm.py`): top-down grasp state machine on the IK action
   (approach → descend → close → lift → carry → lower → release), about 97–98 % success.
 - **DART noise:** a smooth Ornstein–Uhlenbeck offset (σ ~ U(0, 12 mm) per episode) on the *executed* command;
   recorded labels stay clean, so the data contains recoveries.
-- Frames are labelled per skill (`pick` until lifted, then `place`) with that skill's step text.
-- Raw recordings: `datasets/raw/s512_dart_1000.h5` (1000 episodes, 98 GB).
-- LeRobot datasets: `datasets/lerobot/s512_dart_none` (10-D state) and `datasets/lerobot/s512_dart_target`
-  (13-D state with target point, built by `data/add_target_point.py`, videos linked rather than copied).
+- Demonstrations (raw HDF5 in `datasets/raw/rc_*.h5`, all with random plate colours):
+  - 1000 static + 1000 moving-target pick/place (`gen_demos.py`; cube slides during pick / plate during carry);
+  - 400 failures (`gen_fail_demos.py`): pick miss / slip, place released off the plate / dropped;
+  - 1000 find + 200 with the target absent (`gen_find_demos.py`).
+- Processing (`so101_lang/data/`): `hdf5_to_lerobot` (point map + status labels) → merge (`pointmap_merge`) →
+  `build_targets` (SAM2-style targets: detection noise, deadband, update rate, near-gripper freeze; 9-D pose,
+  folded yaw, empirical yaw noise) → `skill_subset` → `mask_failure_motion` (motion before failure detection set
+  to NaN, ignored by the loss).
+- Datasets: `datasets/lerobot/s512_rc_all9` (all pick/place frames), `s512_pick9rc`, `s512_place9rc`,
+  `s512_find9rc` (videos linked to `s512_rc_all_nopm`, not copied).
 
-## 4. VLA training (`so101_lang/policies/smolvla_depth/`, `train/`)
-- LeRobot plugin `smolvla_depth` = SmolVLA + optional native depth branch (point-map tokens, zero-gated)
-  + optional relative actions. Train through `python -m so101_lang.train_cli` (registers the plugin).
-- **Current checkpoint (chosen for future use):** `checkpoints/d2_pointmap_20000/checkpoints/last/pretrained_model`
-  - Same data and recipe as stage 1 plus the native depth branch (head-frame point map from Fast-FoundationStereo
-    → 64 zero-gated tokens). Performs on par with the no-depth model (see the depth comparison) at ~10 ms more
-    latency; kept so depth is available to the policy. Serve with `--depth fast_foundationstereo`.
-- **Stage-1 checkpoint (no depth input):** `checkpoints/mix_target_20000/checkpoints/last/pretrained_model`
-  - 20k steps from the SmolVLA base on `s512_mix_target`: 1000 static + 1000 moving-target episodes (cube slides
-    during pick in ~35 %, plate slides during carry in ~37 %), 13-D state with SAM2-style targets
-    (`data/build_targets.py`: detection noise, 2.5 cm deadband, SAM2 update rate, near-gripper freeze).
-- Previous checkpoint: `checkpoints/s512_target_ft/checkpoints/last/pretrained_model`
-  - Fine-tuned 2,500 steps on `s512_dart_target` from `checkpoints/s512_rel_none_16000` (16k steps, no target).
-  - Depth branch off, relative actions on (9 dims), cameras left→camera1, right→camera2, camera3 empty.
-- SmolVLA's vision-language backbone is frozen (`train_expert_only=True`); about 100 M parameters train.
+## 4. VLA training (`so101_lang/policies/smolvla_depth/`, `scripts/run_stage_skills.sh`)
+- LeRobot plugin `smolvla_depth` = SmolVLA + native depth branch (head-frame point map from Fast-FoundationStereo
+  → 64 zero-gated tokens) + relative actions. Train through `python -m so101_lang.train_cli` (registers the plugin).
+- One model per skill, 15k steps each (~2.4 h on the RTX 5080). SmolVLA's vision-language backbone is frozen
+  (`train_expert_only=True`), so the skills share it; about 100 M parameters train per skill.
 
 ## 5. Perception (`so101_lang/perception/`)
 | Module | What it does |
 |---|---|
-| `stereo_depth.py` | Depth from the stereo pair. Default `fast_foundationstereo` (NVIDIA Fast-FoundationStereo ONNX, TensorRT FP16, 320 px: 2.2 mm median error vs ground truth, ~9 ms). Also SGBM (classical, noisy on textureless table). Colormap encoding and point-map (`depth_to_pointmap`) helpers. |
-| `locate.py` | `TargetLocator`: OWLv2 detection ("a small red cube", "a round flat white plate") + depth in the box centre → head-frame 3-D point; `point_from_mask` with robot self-filter. |
-| `sam2_tracker.py` | SAM2.1-small streaming video tracking, seeded with OWLv2 boxes. Robot self-filter (drops pixels within 3.5 cm of the arm's keypoints), mask-growth and jump checks, occlusion hold, and a 2.5 cm displacement deadband: published target = initial detection + tracked displacement. |
+| `stereo_depth.py` | Depth from the stereo pair. Default `fast_foundationstereo` (NVIDIA Fast-FoundationStereo ONNX, TensorRT FP16, 320 px: 2.2 mm median error vs ground truth, ~9 ms). Also SGBM. Point-map (`depth_to_pointmap`) helpers. |
+| `locate.py` | `TargetLocator`: detection + depth → head-frame point; `locate9` → 9-D pose (yaw from the top face); `point_from_mask` with robot self-filter. |
+| `verify.py` | Ranked detection (`detect_ranked`) and the plausibility gate. |
+| `sam2_tracker.py` | SAM2.1-small streaming tracking seeded with the detection box; `Sam2MultiTracker` = one session per object, added at its own find; state-based locked / following logic (`SAM2_MODE=state`, default). |
 
-Targets are perceived **once at episode start** (before the arm occludes the scene), optionally followed by SAM2.
-Pick targets freeze when the gripper is within 5 cm; place targets within 6 cm.
-
-## 6. Evaluation (`scripts/eval_policy.py` + `serve/policy_server.py`)
+## 6. Evaluation (`scripts/eval.sh` → `scripts/eval_policy.py` + `serve/policy_server.py`)
+- `eval_policy.py` defaults are the current pipeline: find → pick → place, fused find, 9-D SAM2 targets,
+  verdict-ended skills (current frame), 8 s per skill, 50 episodes.
 - Seeded: layouts, pushes and the VLA's sampling noise (per episode and skill) are reproducible, so variants are
   paired. Without seeding, two identical 20-episode runs differed in 10/20 outcomes — use ≥ 50 episodes.
-- `--target {none, oracle, perception, sam2, oracle_tracked}`, `--push` (slide the target cube 3–6 cm over 0.5 s
-  during pick), `--heldout_pairs`, `--sam2_every`.
+- `--push` slides the target cube 3–6 cm over 0.5 s during pick. Variants: `--find_views retry|all|fused`,
+  `--pipeline direct` (no find), `--no-verdict` (skills end on simulator truth), `--target_dim 3` (13-D models).
 - Simulator episode limit (`--episode_length_s`): 2 × step_timeout + 2 s, plus 120 s for the find pipeline.
   A time-out auto-resets the scene mid-episode; each run reports how many episodes it hit (must be 0).
-- Logs per episode: pick/place success, gripper-to-target distance and nearest cube at the first close, target
-  error at close, push distance, SAM2 statuses.
+- Logs per episode: success, find attempts and pose errors, target error at close, nearest cube, verdicts,
+  tracker statuses; the summary breaks down pick misses (yaw / offset), place failure causes and verdict accuracy.
 
 ```bash
-# policy server (lerobot-env), then evaluation (isaacsim env)
-~/lerobot-env/bin/python -m so101_lang.serve.policy_server --checkpoint checkpoints/d2_pointmap_20000/checkpoints/last/pretrained_model --depth fast_foundationstereo
-OMNI_KIT_ACCEPT_EULA=YES ~/isaacsim/bin/python scripts/eval_policy.py --episodes 50 --seed 0 --target sam2
+# server + 150-episode stationary and push runs with the current models (outputs/eval/)
+setsid nohup scripts/eval.sh still push > logs/eval.log 2>&1 < /dev/null &
+# or by hand: server (lerobot-env), then evaluation (isaacsim env)
+~/lerobot-env/bin/python -m so101_lang.serve.policy_server
+OMNI_KIT_ACCEPT_EULA=YES ~/isaacsim/bin/python scripts/eval_policy.py --episodes 150 --seed 0
 ```
 
 ---
 
-## 7. Results so far (fair runs: seeded, 50 paired episodes)
+## 7. Results so far (seeded, paired episodes; newest at the end)
 
 | Setup | Pick | Full pick + place |
 |---|---|---|
@@ -339,40 +339,42 @@ README hold within that margin. Fused views tour six poses and hit it in every e
 before the fix (crashes, 147 mm targets) were this bug.
 
 ## 8. Not done yet / next steps
-- Wire in the LLM planner (Ollama qwen3-vl:8b, `skills_schema()` as the function list, validation, re-planning).
-- Full training run with the target point (current model is a 2,500-step fine-tune).
-- Better first detection (confidence / LLM verification).
-- Verdict quality:
-  - add place-with-empty-gripper failures and post-release hold frames (labelled success) to the place data;
-  - add "partly visible / occluded but present" find successes;
-  - more varied pick-failure demos (wrong-cube grasps, edge grasps) to cut false passes.
-- Random plate colours (2026-10-09 results): make **fused find** the default (pick 73 % vs 57 %), but first find
-  why place "never releases" twice as often after a fused find (static plate target from home?).
-- Grasp alignment: the new models close 14–17° off the cube's faces (old 3°); retrain pick without yaw noise on
-  the targets (or with less), keeping the random colours.
-- Find failures (1 in 6 episodes, mostly plates) and find's unreliable "not found" verdict.
-- Place is the weakest skill (54 % after a good pick vs D2 70 %): more place data, or initialise place from D2.
-- Wire the verdicts into the planner: retry / re-find on failure.
-- ~~Train the VLA to follow moving targets~~ done in stage 1 (combined pick + place model). Separate per-skill models
-  were considered and dropped: the combined model is the one carried forward. (Tooling remains:
-  `hdf5_to_lerobot --skill`, `build_targets --skill`, `policy_server --checkpoint_place`, `run_stage_per_skill.sh`.)
-- ~~Rerun the depth comparison on the working recipe~~ done: no significant gain from either depth variant.
-- Real robot: hand-eye calibration of the head (`head_in_base`), standalone IK, real stereo camera.
+Current best (random plate colours, 150 episodes): stationary pick 73 % / full 45 %, push 31 % / 22 %.
+Stationary failures: place after a good pick 43 (26 never released), find failed 25, pick ~14.
+1. **Place "never releases"** (largest loss, twice as often after fused find): diagnose from the logs; suspect the
+   static plate target when the plate is hidden from home.
+2. **Find failures** (1 in 6 episodes, mostly plates): break down by plate colour; drop or re-prompt colours the
+   detector handles badly.
+3. **One combined retrain:** pick without yaw noise on the targets (new models close 14–17° off the cube faces vs
+   3° before); place data with an empty gripper and post-release hold frames; find successes on partly hidden
+   objects (find's "not found" verdict is almost never right).
+4. **Pushes regressed** (pushed-episode pick 15/93 vs 18/43 for the combined stage-1 model): faster-following
+   tracker (1 cm deadband) with fused find, compared against `d2_pointmap_20000`.
+5. **Wire in the LLM planner** (Ollama qwen3-vl:8b, `skills_schema()` as the function list, validation,
+   re-planning) and let it act on the verdicts (retry / re-find on failure).
+6. Real robot: hand-eye calibration of the head (`head_in_base`), standalone IK, real stereo camera.
 
 ## 9. File map
 ```
 so101_lang/
-  language.py                  object vocabulary, skill registry, skills_schema(), templates
+  language.py                  object vocabulary, plate palette, skill registry, skills_schema(), templates
   sim_app.py                   Isaac Lab launch helpers (isaacsim env)
-  envs/                        task config, MDP terms, stereo head calibration (head.py)
+  envs/                        task config, MDP terms (plate colours), stereo head calibration (head.py)
   expert/pick_place_sm.py      scripted demonstrator (+ DART noise)
   robots/frames.py, so101.py   rigid-transform maths; SO101Adapter
-  data/                        HDF5 → LeRobot converter; add_target_point
-  perception/                  stereo_depth, locate (OWLv2), sam2_tracker
+  data/                        HDF5 → LeRobot converter, point-map merge, build_targets, skill_subset,
+                               mask_failure_motion, status labels
+  perception/                  stereo_depth, locate (OWLv2, locate9), verify (ranked detection), sam2_tracker
   policies/smolvla_depth/      LeRobot plugin (depth branch, relative actions)
-  serve/policy_server.py       VLA + perception server
+  serve/policy_server.py       skill models + perception server; serve/skills.py shared-backbone swapping
   train_cli.py                 lerobot-train with the plugin registered
-scripts/                       data generation, replay, evaluation, benchmarks, experiment drivers
+scripts/
+  run_stage_randcolor.sh       data generation → conversion → targets → per-skill datasets → training
+  run_stage_skills.sh          train skill models (used by the stage driver)
+  eval.sh                      server + seeded evaluation runs (still / push)
+  run_eval_randcolor2.sh       the 2026-10-09 comparison (new vs old models, retry vs fused find)
+  eval_policy.py               closed-loop evaluation;  gen_demos / gen_fail_demos / gen_find_demos.py: recorders
+  *.py                         diagnostics and benchmarks (depth, detection, SAM2, latency, sensitivity)
 train/                         training launchers
 tests/                         frame-maths tests
 models/ (git-ignored)          Fast-FoundationStereo ONNX + TensorRT cache, smolvla_depth base config

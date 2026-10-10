@@ -30,7 +30,7 @@ PLATE_COLORS: dict[str, tuple[float, float, float]] = {
 # blue). Layouts, tasks (by slot) and everything else stay the same, so runs compare one-to-one.
 _PALETTE = {**CUBE_COLORS, **PLATE_COLORS, "orange": (1.0, 0.45, 0.05), "purple": (0.50, 0.15, 0.75),
             "brown": (0.45, 0.25, 0.10)}
-# Plate colours sampled per episode when plate-colour randomisation is on (env cfg / SO101_RANDOM_PLATE_COLORS=1):
+# Plate colours sampled per episode when plate-colour randomisation is on (default; SO101_RANDOM_PLATE_COLORS=0 = off):
 # includes the cube colours on purpose, so policies rely on the target point and shape rather than colour.
 # Black / gray are left out (the table is dark gray).
 PLATE_PALETTE = ["white", "pink", "red", "blue", "green", "yellow", "orange", "purple", "brown"]

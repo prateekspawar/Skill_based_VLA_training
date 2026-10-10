@@ -1,11 +1,14 @@
-"""Closed-loop evaluation of a served VLA on the SO-101 through the robot adapter + IK.
+"""Closed-loop evaluation of the skill pipeline on the SO-101 through the robot adapter + IK.
 
-Each episode runs the two skills the planner would emit for its goal, using the canonical step text:
-``pick(<cube>)`` until the cube is lifted 3 cm (or the step times out), then ``place(<plate>)`` until the
-env's success check fires. Start the server first:
+Defaults = the current pipeline: per episode find(cube), find(plate) (fused multi-view find), then pick and
+place with 9-D SAM2-tracked targets; each skill ends on the model's own [done, success] verdict read from the
+current frame (8 s limit), and every verdict is scored against the simulator. Start the server first:
 
-    ~/lerobot-env/bin/python -m so101_lang.serve.policy_server --checkpoint <.../pretrained_model>
-    ~/isaacsim/bin/python scripts/eval_policy.py --episodes 20 [--viz kit] [--heldout_pairs]
+    ~/lerobot-env/bin/python -m so101_lang.serve.policy_server          # current skill models by default
+    OMNI_KIT_ACCEPT_EULA=YES ~/isaacsim/bin/python scripts/eval_policy.py --episodes 150 --seed 0 [--push]
+
+Older combined pick+place model (13-D state): --checkpoint d2_... on the server, and here
+--pipeline direct --target_dim 3 --no-verdict --step_timeout 12 --freeze_radius 0.05.
 """
 
 import argparse
@@ -15,9 +18,9 @@ from so101_lang import sim_app
 
 TASK = "SO101-PickPlace-Lang-IK-v0"
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--episodes", type=int, default=20)
+parser.add_argument("--episodes", type=int, default=50)
 parser.add_argument("--exec_steps", type=int, default=10, help="Actions executed from each predicted chunk.")
-parser.add_argument("--step_timeout", type=float, default=12.0, help="Seconds allowed per skill.")
+parser.add_argument("--step_timeout", type=float, default=8.0, help="Seconds allowed per skill.")
 parser.add_argument("--port", type=int, default=6000)
 parser.add_argument("--heldout_pairs", action="store_true", help="Sample only the held-out (cube, plate) pairs.")
 parser.add_argument("--target", choices=["none", "oracle", "perception", "sam2", "oracle_tracked"], default="sam2",
@@ -35,14 +38,14 @@ parser.add_argument("--pipeline", choices=["direct", "find"], default="find",
 parser.add_argument("--find_retries", type=int, default=3,
                     help="Preset viewing poses tried when a find() result is not plausible (max 3; each moves the arm "
                          "to a different view and looks again).")
-parser.add_argument("--find_views", choices=["retry", "all", "fused"], default="retry",
+parser.add_argument("--find_views", choices=["retry", "all", "fused"], default="fused",
                     help="retry: preset views only until a plausible match; all: always look from every preset view "
                          "too and keep the best plausible match; fused: look from the find view and every preset "
                          "view with all trackers paused, fuse the plausible detections that agree (2 cm), then "
                          "start both trackers from home anchored at the fused positions.")
-parser.add_argument("--target_dim", type=int, choices=[3, 9], default=3,
+parser.add_argument("--target_dim", type=int, choices=[3, 9], default=9,
                     help="Target sent to the policy: 3 = position, 9 = position + 6-D rotation (19-D state models).")
-parser.add_argument("--freeze_radius", type=float, default=0.05,
+parser.add_argument("--freeze_radius", type=float, default=0.03,
                     help="Pick target stops updating once the TCP is this close to it [m] (and when the gripper closes).")
 parser.add_argument("--home_grip", choices=["keep", "closed"], default="closed",
                     help="Gripper during the scripted return home after find(): closed = the pick start state seen in "
@@ -57,11 +60,11 @@ parser.add_argument("--find_accept", choices=["plausible", "either"], default="p
 parser.add_argument("--rank_debug", action="store_true",
                     help="Log how the true object fared in the ranked detection whenever a find result is implausible.")
 parser.add_argument("--sam2_every", type=int, default=3, help="Control steps between SAM2 updates during pick.")
-parser.add_argument("--verdict", action="store_true",
+parser.add_argument("--verdict", action=argparse.BooleanOptionalAction, default=True,
                     help="12-D action models: a skill ends when the model reports done ([done, success] > 0.5 for 2 "
                          "consecutive actions), not on simulator truth; a failed verdict or a timeout stops the episode "
                          "(hold still). Each verdict is scored against the simulator.")
-parser.add_argument("--verdict_from", choices=["executed", "first"], default="executed",
+parser.add_argument("--verdict_from", choices=["executed", "first"], default="first",
                     help="executed: read [done, success] from every executed action (later chunk entries are predictions "
                          "of the future); first: only from the first action of each new chunk (the current frame).")
 parser.add_argument("--fold_cube_yaw", action="store_true",

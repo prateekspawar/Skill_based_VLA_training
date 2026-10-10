@@ -1,10 +1,13 @@
-"""Serve a trained LeRobot policy to the simulator over a local socket (run in ``~/lerobot-env``).
+"""Serve the skill models and perception to the simulator over a local socket (run in ``~/lerobot-env``).
 
-The simulator process (``~/isaacsim``) sends ``{"left", "right" (H,W,3 uint8), "state" (10,), "task" (str)}``
-and receives an action chunk ``(T, 10)`` of head-frame end-effector targets. Depth for the third camera is
-computed here from the stereo pair with the same backend used to build the training dataset.
+Policy queries: the simulator process (``~/isaacsim``) sends ``{"left", "right" (H,W,3 uint8), "state", "task",
+"target"}`` and receives a head-frame action chunk (skill models: ``(T, 12)`` = TCP pose + gripper + [done,
+success]). Perception commands (``locate9``, ``find_start``, ``sam2_update``, ...) run OWLv2 ranked detection,
+stereo depth and the SAM2 trackers here. Run from the repository root:
 
-    ~/lerobot-env/bin/python -m so101_lang.serve.policy_server --checkpoint checkpoints/smolvla/checkpoints/last/pretrained_model
+    ~/lerobot-env/bin/python -m so101_lang.serve.policy_server                 # current skill models (DEFAULT_SKILLS)
+    ~/lerobot-env/bin/python -m so101_lang.serve.policy_server --skills pick=... place=... find=...
+    ~/lerobot-env/bin/python -m so101_lang.serve.policy_server --checkpoint .../pretrained_model   # one combined model
 """
 
 from __future__ import annotations
@@ -86,11 +89,16 @@ def build_obs(msg: dict, depth) -> dict:
     return obs
 
 
+# Current skill models (random plate colours, 9-D targets, pass/fail verdict).
+DEFAULT_SKILLS = {sk: f"checkpoints/{sk}9rc_15000/checkpoints/last/pretrained_model" for sk in ("pick", "place", "find")}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", default=None, help="Path to a pretrained_model directory")
     parser.add_argument("--skills", nargs="+", default=None, metavar="SKILL=CHECKPOINT",
-                        help="Separate skill models on one shared backbone, e.g. pick=... place=... find=...")
+                        help="Separate skill models on one shared backbone, e.g. pick=... place=... find=... "
+                             "Default (no --checkpoint either): the current models, DEFAULT_SKILLS.")
     parser.add_argument("--checkpoint_place", default=None,
                         help="Optional separate model for the place skill (then --checkpoint serves pick).")
     parser.add_argument("--calibration", default=None, help="stereo_calibration.json (defaults to the training dataset's)")
@@ -99,6 +107,8 @@ def main():
     args = parser.parse_args()
 
     skills = None
+    if not args.skills and not args.checkpoint:
+        args.skills = [f"{sk}={ck}" for sk, ck in DEFAULT_SKILLS.items()]
     if args.skills:  # shared-backbone skill models, swapped in place
         from so101_lang.serve.skills import SkillModels
 
