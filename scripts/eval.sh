@@ -25,7 +25,7 @@ for r in ${@:-still push}; do
   log "running $r"
   OMNI_KIT_ACCEPT_EULA=YES ~/isaacsim/bin/python scripts/eval_policy.py --episodes ${EPISODES:-150} --seed 0 \
     $flags ${EVAL_EXTRA:-} --video_out $OUT/$r.mp4 > $OUT/$r.log 2>&1
-  grep -E "\[eval\] (pick success|pushes|verdict|find\(|find:|simulator time-out|place failures|pick missed)" $OUT/$r.log \
+  grep -E "\[eval\] (pick success|pushes|verdict|find\(|find:|simulator time-out|place failures|pick missed|pick retries)" $OUT/$r.log \
     | sed "s/^/[eval] $r: /"
 done
 kill $server; wait $server 2>/dev/null

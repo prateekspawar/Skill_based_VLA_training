@@ -47,6 +47,12 @@ parser.add_argument("--target_dim", type=int, choices=[3, 9], default=9,
                     help="Target sent to the policy: 3 = position, 9 = position + 6-D rotation (19-D state models).")
 parser.add_argument("--freeze_radius", type=float, default=0.03,
                     help="Pick target stops updating once the TCP is this close to it [m] (and when the gripper closes).")
+parser.add_argument("--pick_retries", type=int, default=2,
+                    help="Find pipeline: when pick ends without a cube in the hand (gripper opening below "
+                         "--grasp_min_opening, or no pass verdict), open, go home, re-detect the cube and pick again, up "
+                         "to this many times. 0 = off (a missed grasp reported as success then runs place).")
+parser.add_argument("--grasp_min_opening", type=float, default=0.05,
+                    help="Gripper opening below which the gripper is closed on nothing (holding a cube: ~0.10).")
 parser.add_argument("--place_release", choices=["hold", "open"], default="hold",
                     help="After a place success verdict, the 0.5 s hold before scoring keeps the last command (hold) or "
                          "commands the gripper open at the same pose (open). The place model's success label starts "
@@ -629,7 +635,11 @@ with sim_app.launch(env_cfg, args):
                 "opening": float(state_now(head_b)[0, 9])}
         if find_failed:
             steps = []  # find() failed after all retries: stop and hold, report to the orchestrator
-        for skill_i, (skill, text) in enumerate(steps):
+        outcome["pick_retries"] = 0
+        skill_i = -1
+        while skill_i + 1 < len(steps):
+            skill_i += 1
+            skill, text = steps[skill_i]
             conn.send({"cmd": "reset", "seed": args.seed * 100000 + ep * 10 + skill_i, "skill": skill})
             conn.recv()
             # The target is fixed for the whole skill (cube before grasp, plate is static).
@@ -761,6 +771,41 @@ with sim_app.launch(env_cfg, args):
                     outcome["place"] = truth
                 verdicts[skill].append((vd.result if vd.result is not None else "timeout", truth))
                 outcome[f"{skill}_verdict"] = verdicts[skill][-1]
+                if skill == "pick" and not done and args.pipeline == "find":
+                    # Grasp check from proprioception: a gripper closed on nothing has opening ~0, one holding the
+                    # cube ~0.10. The pick model reports success after many misses, so this decides, not the verdict.
+                    opening = float(state_now(head_b)[0, 9])
+                    holding = opening >= args.grasp_min_opening and vd.result is True
+                    outcome.setdefault("grasp_checks", []).append(round(opening, 3))
+                    if not holding and outcome["pick_retries"] < args.pick_retries:
+                        outcome["pick_retries"] += 1
+                        outcome.setdefault("first_close", outcome["close"])
+                        open_cmd = state_now(head_b)[0].clone()
+                        open_cmd[9] = 1.0  # let go of anything, then back to the pick start pose
+                        for _ in range(10):
+                            env.step(adapter.ik_command(open_cmd.unsqueeze(0), head_b))
+                        go_home(home_link, head_b)
+                        # Re-detect the cube (fresh detection + tracker) from home, else from the preset views.
+                        q, seed_r = language.cube_ref(cube), args.seed * 100000 + ep * 10 + 5
+                        pose_r, ok_r, _ = run_find(q, f"cube_{cube}", head_b, ep, seed_r, use_model=False)
+                        for v in ([] if ok_r else list(VIEW_POSES)):
+                            go_to_view(VIEW_POSES[v], head_b, on_step=bg_track)
+                            pose_r, ok_r, _ = run_find(q, f"cube_{cube}", head_b, ep, seed_r, use_model=False)
+                            if ok_r:
+                                break
+                        if not ok_r:
+                            outcome["retry_find_failed"] = True
+                            break
+                        go_home(home_link, head_b, on_step=bg_track)  # (no-op if found from home) tracker keeps running
+                        static_targets.pop("pick", None)
+                        perceived = sam2_targets("sam2_update", cube, plate, head_b)
+                        rot6d["pick"] = pose_r[3:]
+                        outcome["close"], outcome["pick"] = None, False
+                        rest_z = float(env.scene[cube_name].data.root_pos_w.torch[0, 2])
+                        steps.insert(skill_i + 1, (skill, text))
+                        continue
+                    if not holding:
+                        break  # missed and out of retries: do not run place with an empty gripper
                 if vd.result is not True:
                     break  # failed / timed out: stop and hold, the orchestrator decides what next
                 continue
@@ -785,6 +830,11 @@ with sim_app.launch(env_cfg, args):
                                                if f"{sk}_t" in outcome)
             if outcome.get("pick_lift_t") is not None:
                 close_txt += f" (lifted at {outcome['pick_lift_t']:.1f}s)"
+            if outcome.get("grasp_checks"):
+                close_txt += f" | grasp check opening {outcome['grasp_checks']}"
+            if outcome["pick_retries"]:
+                close_txt += (f" | pick retries {outcome['pick_retries']}"
+                              + (" (re-detect failed)" if outcome.get("retry_find_failed") else ""))
             if outcome.get("release_forced"):
                 close_txt += " | release forced after place verdict"
         if outcome["pick"] and not outcome["place"]:
@@ -846,6 +896,10 @@ with sim_app.launch(env_cfg, args):
     full = sum(r["place"] for r in results)
     print(f"[eval] pick success {pick}/{n} = {pick / n:.0%}; full pick+place {full}/{n} = {full / n:.0%}; "
           f"mean server latency {1000 * np.mean(latencies):.0f} ms")
+    rt = [r for r in results if r.get("pick_retries")]
+    print(f"[eval] pick retries: {len(rt)}/{n} episodes retried ({sum(r['pick_retries'] for r in rt)} retries); picked after a "
+          f"retry {sum(r['pick'] for r in rt)}, full {sum(r['place'] for r in rt)}; re-detect failed "
+          f"{sum(bool(r.get('retry_find_failed')) for r in rt)}")
     to = [r["time_out_resets"] for r in results]
     print(f"[eval] simulator time-out resets mid-episode: {sum(t > 0 for t in to)}/{n} episodes "
           f"(episode limit {env_cfg.episode_length_s:.0f} s)")
