@@ -192,6 +192,10 @@ class PickPlaceExpert:
         # Phase transitions.
         self.timer += self.dt * (~self.freeze).float()  # a frozen expert neither times out nor advances
         arrived = (torch.linalg.norm(goal - tcp_now, dim=-1) < cfg.reach_tol) & (dist.squeeze(-1) <= step.squeeze(-1))
+        # Retreat only needs the height: with the gripper open the TCP settles ~1.3 cm sideways of the goal (IK),
+        # just outside reach_tol, which made the retreat run into its 4 s timeout in most post-release demos.
+        arrived |= ((self.phase == Phase.RETREAT) & ((goal[:, 2] - tcp_now[:, 2]).abs() < cfg.reach_tol)
+                    & (dist.squeeze(-1) <= step.squeeze(-1)))
         timed_out = self.timer > cfg.phase_timeout
         moving_phase = (
             (self.phase == Phase.APPROACH)
