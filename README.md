@@ -370,13 +370,29 @@ Findings:
 4. Remaining stationary failures (42): released off the plate 12, find failed 6, pick misses ~15, never released 4.
    Push: pick on pushed episodes 20/109 — the tracker / pick under motion is now the largest gap.
 
+**Push study (2026-10-11; defaults, same 150 push scenes, cube slid 3–6 cm during pick).**
+
+| Tracker | pushed episodes | picked |
+|---|---|---|
+| state-based (default) | 109 | 20 (18 %) |
+| state-based, follows after 1 trusted measurement > 1 cm | 107 | 17 (16 %) |
+| displacement deadband 1 cm | 109 | 19 (17 %) |
+
+- The tracker is not the bottleneck. The gripper closes a median 0.7 s after the push ends; in 44 episodes the
+  target had caught up before the close, yet only 13 were picked (gripper ~30 mm from the cube at close).
+- **The pick model closes on schedule instead of re-aiming:** its moving-target demos only moved the cube during
+  the approach (gripper > 6 cm away), never during the descent.
+- Fix in the data: `gen_demos --late_pick_move` slides the cube during the descent (jaws ≥ 4 cm above it); the
+  expert follows it (and lifts straight up to re-approach if it moves faster than the expert,
+  `ExpertCfg.recover_dist`). 500 such demos (`rc2_latepush_500`) for the retrain.
+
 ## 8. Not done yet / next steps
 Current best (defaults, random plate colours, 150 episodes): stationary pick 86 % / full 72 %, push 35 % / 33 %.
-1. **Retrain** (decision pending) with the post-release place demos (`rc2_*`, generating), so place reports success
+1. **Retrain** (decision pending) with the post-release place demos (`rc2_*`, generated), so place reports success
    after releasing and the forced release can go; optionally pick without yaw noise on the targets (new models close
    14–17° off the cube faces vs 3° before).
-2. **Pushes:** pick on pushed episodes 18 %. Faster-following tracker (1 cm deadband) with fused find, compared
-   against `d2_pointmap_20000` (combined stage-1 model: 18/43).
+2. **Pushes:** pick on pushed episodes 18 %, the same with every tracker; the pick model must learn to re-aim
+   during the descent (late-push demos `rc2_latepush_500`, for the retrain).
 3. **Place accuracy:** "released off the plate" (12 / 150) is now the largest place failure.
 4. **Verdicts:** find's "not found" is never right (0 of 61); place verdict 76 % accurate. Add partly-visible find
    successes and place-with-empty-gripper failures to the data.

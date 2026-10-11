@@ -52,6 +52,9 @@ class ExpertCfg:
     release_time: float = 0.6  # [s]
     open_cmd: float = 0.35  # gripper closedness while approaching (0 = fully open)
     randomize: bool = True  # jitter heights / speed per episode for demo diversity
+    # Recovery: if the cube moves this far sideways during the descent, lift straight up to hover height first,
+    # then approach it again (instead of steering sideways into it at grasp height).
+    recover_dist: float = 0.015  # [m]
     # DART-style noise injection: the executed command gets a smooth random offset while the recorded label
     # (cmd_pos) stays clean, so demonstrations contain recoveries from being slightly off the nominal path.
     dart_sigma_max: float = 0.0  # [m] per-episode sigma is drawn from U(0, dart_sigma_max); 0 disables
@@ -78,6 +81,9 @@ class PickPlaceExpert:
         self.place_offset = torch.zeros(num_envs, 3, device=device)  # added to the release point -> off the plate
         self.force_open = torch.zeros(num_envs, dtype=torch.bool, device=device)  # open the gripper now (slip / drop)
         self.freeze = torch.zeros(num_envs, dtype=torch.bool, device=device)  # stop making progress (stall)
+        self.recovering = torch.zeros(num_envs, dtype=torch.bool, device=device)  # lifting after the cube moved
+        self.recover_xy = torch.zeros(num_envs, 2, device=device)
+        self.recoveries = torch.zeros(num_envs, dtype=torch.long, device=device)  # per episode (for recording)
 
     def reset(self, env_ids: torch.Tensor | None = None):
         ids = slice(None) if env_ids is None else env_ids
@@ -90,6 +96,8 @@ class PickPlaceExpert:
         self.place_offset[ids] = 0.0
         self.force_open[ids] = False
         self.freeze[ids] = False
+        self.recovering[ids] = False
+        self.recoveries[ids] = 0
         self.dart_sigma[ids] = torch.rand(k, device=self.device) * self.cfg.dart_sigma_max
         if self.cfg.randomize:
             self.hover[ids] = self.cfg.hover_height + (torch.rand(k, device=self.device) - 0.5) * 0.03
@@ -140,6 +148,14 @@ class PickPlaceExpert:
         # Track the cube until the jaws close, then freeze (it moves with the gripper afterwards).
         tracking = (self.phase <= Phase.DESCEND).unsqueeze(-1)
         self.pick_pos = torch.where(tracking, cube[:, :3], self.pick_pos)
+        moved = (self.phase == Phase.DESCEND) & (
+            torch.linalg.norm(self.pick_pos[:, :2] - self.cmd_pos[:, :2], dim=-1) > cfg.recover_dist)
+        if moved.any():  # the cube moved under the descending gripper: back off upwards, then approach again
+            self.recovering |= moved
+            self.recover_xy = torch.where(moved.unsqueeze(-1), self.cmd_pos[:, :2], self.recover_xy)
+            self.recoveries += moved.long()
+            self.phase = torch.where(moved, torch.full_like(self.phase, Phase.APPROACH), self.phase)
+            self.timer = torch.where(moved, torch.zeros_like(self.timer), self.timer)
 
         # Goal TCP position and gripper command per phase.
         cube_top = self.pick_pos + torch.tensor([0.0, 0.0, cfg.grasp_depth], device=self.device) + self.grasp_offset
@@ -158,6 +174,8 @@ class PickPlaceExpert:
             (self.phase == Phase.LOWER).unsqueeze(-1) | (self.phase == Phase.RELEASE).unsqueeze(-1), place, goal
         )
         goal = torch.where((self.phase >= Phase.RETREAT).unsqueeze(-1), place + hover, goal)
+        up = torch.cat([self.recover_xy, (cube_top + hover)[:, 2:]], dim=-1)  # straight up from where it was
+        goal = torch.where(self.recovering.unsqueeze(-1), up, goal)
 
         closed = (self.phase >= Phase.CLOSE) & (self.phase <= Phase.LOWER)
         grip = torch.where(closed, torch.ones(self.n, device=self.device), torch.full((self.n,), cfg.open_cmd, device=self.device))
@@ -183,7 +201,8 @@ class PickPlaceExpert:
             | (self.phase == Phase.LOWER)
             | (self.phase == Phase.RETREAT)
         )
-        advance = moving_phase & (arrived | timed_out)
+        advance = moving_phase & (arrived | timed_out) & ~self.recovering
+        self.recovering &= ~(arrived | timed_out)  # at hover height: the normal approach takes over
         self.last_timed_out = moving_phase & timed_out & ~arrived
         advance |= (self.phase == Phase.CLOSE) & (self.timer > cfg.close_time)
         advance |= (self.phase == Phase.RELEASE) & (self.timer > cfg.release_time)

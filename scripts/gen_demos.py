@@ -35,6 +35,9 @@ parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--dart_sigma", type=float, default=0.012, help="Max per-episode DART noise sigma [m]; 0 disables.")
 parser.add_argument("--move_prob_pick", type=float, default=0.0,
                     help="Probability that the target cube slides 3-6 cm during the pick approach.")
+parser.add_argument("--late_pick_move", type=float, default=0.0,
+                    help="Share of the pick slides that happen during the descent (jaws still >= 4 cm above the cube) "
+                         "instead of the approach; the expert then lifts straight up and approaches again.")
 parser.add_argument("--move_prob_place", type=float, default=0.0,
                     help="Probability that the target plate slides 3-6 cm while the cube is carried.")
 parser.add_argument("--post_release_frames", type=int, default=5,
@@ -149,6 +152,7 @@ with sim_app.launch(env_cfg, args):
         return {
             "move": {
                 "pick": rng.random() < args.move_prob_pick, "place": rng.random() < args.move_prob_place,
+                "pick_late": rng.random() < args.late_pick_move,
                 "pick_at": rng.uniform(0.3, 1.0), "place_at": rng.uniform(0.1, 0.6),
                 "active": None, "moved_pick_mm": 0.0, "moved_place_mm": 0.0,
             },
@@ -191,8 +195,10 @@ with sim_app.launch(env_cfg, args):
             ph = int(expert.phase[i])
             if mv["active"] is None:
                 cube_b, plate_b = priv[i, cube, :3], priv[i, language.NUM_CUBES + plate, :3]
-                if (mv["pick"] and ph == Phase.APPROACH and buf["steps"] * env.step_dt >= mv["pick_at"]
-                        and float(torch.linalg.norm(tcp_b[i] - cube_b)) > 0.06):
+                early = (not mv["pick_late"] and ph == Phase.APPROACH and buf["steps"] * env.step_dt >= mv["pick_at"]
+                         and float(torch.linalg.norm(tcp_b[i] - cube_b)) > 0.06)
+                late = mv["pick_late"] and ph == Phase.DESCEND and float(tcp_b[i, 2] - cube_b[2]) > 0.04
+                if mv["pick"] and (early or late):
                     mv["pick"] = False
                     plan = plan_slide(i, CUBE_NAMES[cube], {k: v for k, v in clearance.items()})
                     if plan:
@@ -266,6 +272,8 @@ with sim_app.launch(env_cfg, args):
                 g.create_dataset("plate_pos", data=np.stack(buf["plate_pos"]).astype(np.float32))
                 g.attrs["moved_pick_mm"] = buf["move"]["moved_pick_mm"]
                 g.attrs["moved_place_mm"] = buf["move"]["moved_place_mm"]
+                g.attrs["late_pick_move"] = bool(buf["move"]["pick_late"] and buf["move"]["moved_pick_mm"] > 0)
+                g.attrs["recoveries"] = int(expert.recoveries[i])  # read before expert.reset below
                 saved += 1
                 if saved % 10 == 0:
                     h5.flush()
