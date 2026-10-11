@@ -37,7 +37,9 @@ Design goals (from the project owner):
                   output : 50-step chunk of 12-D actions = TCP pose + gripper opening + [done, success]
                   first 10 actions executed per query (~120 ms), then re-query; SAM2 updates the target every
                   3 steps, the pick target freezes within 3 cm of the gripper. A skill ends when done > 0.5 on
-                  2 consecutive current-frame readings, or after 16 s.
+                  2 consecutive current-frame readings, or after 16 s. Grasp check after pick: gripper
+                  opening < 0.05 (closed on nothing) or no pass verdict → open, go home, re-detect the cube, pick
+                  again (up to 2 retries).
         │ 10-D head-frame action
         ▼
  ⑤ SO101Adapter   head → base calibration, TCP offset, gripper opening → joint angle (so101_lang/robots/so101.py)
@@ -407,21 +409,37 @@ timeout, leaving ~90 identical hover frames with only the last 5 labelled). Find
   the expert simply re-aims during the descent were not enough for the pick model to re-aim.
 - Remaining stationary failures (34): pick misses 15, find failed 8, place 9.
 
+### Grasp check and pick retry in the executor (2026-10-12; `*9rc2`, 150 seeded episodes, same scenes)
+Traces of pushed episodes (`--video_episodes`): the pick model descends and closes on its learned schedule even when
+the target is already correct 30–57 mm away; the target froze at the first close, and the model then reported
+success with an empty gripper. The gripper opening tells a miss apart reliably: 0.00–0.01 when closed on nothing
+(104 of 107 failed picks), ~0.10 when holding a cube. The executor now checks it after pick and, on a miss (or no
+pass verdict), opens, goes home, re-detects the cube (home view, else the preset views; fresh tracker) and picks
+again, up to twice (`--pick_retries 2`, `--grasp_min_opening 0.05`, defaults).
+
+| Executor | Stationary pick / full | Push pick / full | pushed picked | episodes retried (still / push) |
+|---|---|---|---|---|
+| no retry | 83 % / 77 % | 31 % / 29 % | 23/119 (19 %) | — |
+| **grasp check + retry (default)** | **91 % / 85 %** | **87 % / 80 %** | **105/116 (91 %)** | 19 / 90 |
+
+Paired vs no retry: stationary pick 12 wins / 0 losses, full 14 / 3; push pick 83 / 0, full 79 / 3.
+- After a miss the cube is usually still and visible, so the second attempt succeeds (80 of 90 push episodes that
+  retried were picked). Re-detection failed in 3 / 6 episodes.
+- The model's lack of re-aiming during the descent remains (most pushed episodes need a retry); retries cost time,
+  not success.
+- Remaining stationary failures (23): place 10, find failed 6, pick 7.
+
 ## 8. Not done yet / next steps
-Best (random plate colours, 150 episodes): `*9rc2` models, stationary pick 83 % / full 77 %, place after pick 93 %;
-push 31 % / 29 % (pushed cubes picked ~19 %). These are the defaults (forced release off).
-1. ~~Switch the defaults to `*9rc2`~~ done.
-2. **Pushes** are the largest gap and neither tracker changes nor 500 late-push demos helped. Next: look at what the
-   pick model does after a late push (videos), more / more varied late-push data, or a pick retry in the executor
-   (needs a reliable pick verdict: 54 % under pushes, 64 false passes).
-3. **Pick misses** (15 / 150 stationary) and **find failures** (8; blue cube not proposed by the detector in some
-   views).
-4. **Verdicts:** find's "not found" is never right; pick false passes under pushes.
-5. Verify the expert retreat fix (`ExpertCfg`, retreat counts as arrived at its height) with a small `gen_demos`
-   run before generating more data.
-6. **Wire in the LLM planner** (Ollama qwen3-vl:8b, `skills_schema()`), acting on the verdicts.
-7. Real robot: hand-eye calibration of the head (`head_in_base`), standalone IK, real stereo camera; refit the
-   colour model on real images.
+Best (defaults: `*9rc2`, grasp check + retry, random plate colours, 150 episodes): stationary pick 91 % / full 85 %;
+push pick 87 % / full 80 % (pushed cubes picked 91 %).
+1. **Place** (10 failures / 150): released over / off the plate, bad plate target.
+2. **Find failures** (6–9 / 150; blue cube sometimes not proposed by the detector) and find's "not found" verdict
+   (never right).
+3. **Re-aiming during the descent** (data): the model still closes on schedule after a late push; retries cover it.
+4. Verify the expert retreat fix (`ExpertCfg`) with a small `gen_demos` run before generating more data.
+5. **Wire in the LLM planner** (Ollama qwen3-vl:8b, `skills_schema()`), acting on the verdicts and the grasp check.
+6. Real robot: hand-eye calibration of the head (`head_in_base`), standalone IK, real stereo camera; refit the
+   colour model on real images; calibrate the gripper-opening threshold on the real gripper.
 
 ## 9. File map
 ```
