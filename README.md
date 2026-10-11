@@ -386,17 +386,40 @@ Findings:
   expert follows it (and lifts straight up to re-approach if it moves faster than the expert,
   `ExpertCfg.recover_dist`). 500 such demos (`rc2_latepush_500`) for the retrain.
 
+### Retrain on post-release / late-push demos (`pick9rc2`, `place9rc2`; 2026-10-11; 150 seeded episodes, same scenes)
+Data (`scripts/run_stage_rc2.sh`): `rc2_static_1000` + `rc2_moving_1000` + `rc2_latepush_500` (recorded through the
+release and the expert's retreat; in the late-push set the cube slides during the pick descent) + `rc_fail_400`.
+Pick targets with 3° Gaussian yaw noise (instead of the empirical noise of `*9rc`). The place success label covers
+every frame after the gripper is fully open (`data/relabel_release.py`: the expert's retreat mostly ran into its 4 s
+timeout, leaving ~90 identical hover frames with only the last 5 labelled). Find unchanged (`find9rc`).
+
+| Models | Stationary pick / full | place after pick | place failures | place verdict acc. | jaw–cube yaw at close (picked) | Push pick / full | pushed picked |
+|---|---|---|---|---|---|---|---|
+| `*9rc` (defaults until now) | 86 % / 72 % | 84 % | 21 | 76 % | 16.6° | 35 % / 33 % | 20/109 |
+| **`*9rc2`** | 83 % / **77 %** | **93 %** | **9** | **87 %** | **4.1°** | 31 % / 29 % | 23/119 |
+| `*9rc2`, no forced release | 83 % / 77 % | 93 % | 9 | 87 % | — | — | — |
+
+- **Place releases on its own now.** With and without the forced release the run is identical (0 forced
+  releases needed); "never released" 4 → 1, place verdict 87 % accurate with no timeouts.
+- **Grasp alignment fixed** by the smaller yaw noise (jaws 4° off the cube faces vs 17°). Pick is unchanged
+  within noise (10 wins / 14 losses), full success 77 vs 72 % (28 / 20, not yet significant).
+- **Late-push demos did not help pushes** (scenes pushed in both runs: 21 vs 20 picked of 106). 500 demos in which
+  the expert simply re-aims during the descent were not enough for the pick model to re-aim.
+- Remaining stationary failures (34): pick misses 15, find failed 8, place 9.
+
 ## 8. Not done yet / next steps
-Current best (defaults, random plate colours, 150 episodes): stationary pick 86 % / full 72 %, push 35 % / 33 %.
-1. **Retrain** (decision pending) with the post-release place demos (`rc2_*`, generated), so place reports success
-   after releasing and the forced release can go; optionally pick without yaw noise on the targets (new models close
-   14–17° off the cube faces vs 3° before).
-2. **Pushes:** pick on pushed episodes 18 %, the same with every tracker; the pick model must learn to re-aim
-   during the descent (late-push demos `rc2_latepush_500`, for the retrain).
-3. **Place accuracy:** "released off the plate" (12 / 150) is now the largest place failure.
-4. **Verdicts:** find's "not found" is never right (0 of 61); place verdict 76 % accurate. Add partly-visible find
-   successes and place-with-empty-gripper failures to the data.
-5. **Blue cube not proposed by the detector** in some views (find picks the green cube, correctly rejected).
+Best (random plate colours, 150 episodes): `*9rc2` models, stationary pick 83 % / full 77 %, place after pick 93 %;
+push 31 % / 29 % (pushed cubes picked ~19 %). The defaults still serve `*9rc` (switch pending).
+1. **Switch the defaults** to `pick9rc2` / `place9rc2` and `--place_release hold` (the forced release is no longer
+   needed).
+2. **Pushes** are the largest gap and neither tracker changes nor 500 late-push demos helped. Next: look at what the
+   pick model does after a late push (videos), more / more varied late-push data, or a pick retry in the executor
+   (needs a reliable pick verdict: 54 % under pushes, 64 false passes).
+3. **Pick misses** (15 / 150 stationary) and **find failures** (8; blue cube not proposed by the detector in some
+   views).
+4. **Verdicts:** find's "not found" is never right; pick false passes under pushes.
+5. Verify the expert retreat fix (`ExpertCfg`, retreat counts as arrived at its height) with a small `gen_demos`
+   run before generating more data.
 6. **Wire in the LLM planner** (Ollama qwen3-vl:8b, `skills_schema()`), acting on the verdicts.
 7. Real robot: hand-eye calibration of the head (`head_in_base`), standalone IK, real stereo camera; refit the
    colour model on real images.
