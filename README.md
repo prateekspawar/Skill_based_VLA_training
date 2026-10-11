@@ -37,8 +37,7 @@ Design goals (from the project owner):
                   output : 50-step chunk of 12-D actions = TCP pose + gripper opening + [done, success]
                   first 10 actions executed per query (~120 ms), then re-query; SAM2 updates the target every
                   3 steps, the pick target freezes within 3 cm of the gripper. A skill ends when done > 0.5 on
-                  2 consecutive current-frame readings, or after 16 s; after a place
-                  success the executor opens the gripper (`--place_release open`).
+                  2 consecutive current-frame readings, or after 16 s.
         │ 10-D head-frame action
         ▼
  ⑤ SO101Adapter   head → base calibration, TCP offset, gripper opening → joint angle (so101_lang/robots/so101.py)
@@ -67,7 +66,8 @@ Process layout (two Python environments that talk over a local socket):
 | Policy server | `~/lerobot-env` (LeRobot 0.6.1, PyTorch 2.11 cu130, TensorRT 10.16) | `so101_lang/serve/policy_server.py`: skill models (shared 350 M backbone + 101 M per skill, 0.8 ms swap), OWLv2, SAM2.1-small, Fast-FoundationStereo |
 | Planner LLM (not wired in yet) | Ollama in `~/.local/ollama` | `qwen3-vl:8b` |
 
-Current models: `checkpoints/{pick,place,find}9rc_15000` (served by default). Old white/pink-plate models for
+Current models (served by default): `checkpoints/pick9rc2_15000`, `place9rc2_15000`, `find9rc_15000`. Previous:
+`pick9rc_15000` / `place9rc_15000` (needed `--place_release open`). Old white/pink-plate models for
 comparison: `pick9fm_15000`, `place9m_15000`, `find9s_15000`. Earlier combined pick+place model (13-D state,
 best push result): `d2_pointmap_20000`.
 
@@ -141,7 +141,7 @@ Training phrasings and held-out phrasings per skill are defined there; `HELDOUT_
 
 ## 6. Evaluation (`scripts/eval.sh` → `scripts/eval_policy.py` + `serve/policy_server.py`)
 - `eval_policy.py` defaults are the current pipeline: find → pick → place, fused find, 9-D SAM2 targets,
-  verdict-ended skills (current frame), 16 s per skill, gripper opened after a place success, 50 episodes.
+  verdict-ended skills (current frame), 16 s per skill, 50 episodes.
 - Seeded: layouts, pushes and the VLA's sampling noise (per episode and skill) are reproducible, so variants are
   paired. Without seeding, two identical 20-episode runs differed in 10/20 outcomes — use ≥ 50 episodes.
 - `--push` slides the target cube 3–6 cm over 0.5 s during pick. Variants: `--find_views retry|all|fused`,
@@ -361,7 +361,7 @@ Findings:
    place never ran; 5 were place running out of 8 s; 9 were place reporting success before opening.
 2. **The place success label sat before the release.** Demos ended when the success term first fired, with the
    gripper ~27 % open; the last-5-frames success label covered closed-gripper frames, so the model says "success"
-   just before releasing. Executor workaround: `--place_release open` (default). Data fix: `gen_demos
+   just before releasing. Executor workaround: `--place_release open` (default until the `*9rc2` models). Data fix: `gen_demos
    --post_release_frames 5` records through the retreat; new demos `rc2_*` are being generated.
 3. **Plate colour failures were the hand-set colour rules.** Brown failed 94 % of finds: the bright lighting renders
    brown as light tan, which the HSV rule scored 0.00; orange scored higher as yellow, pink as white. The learned
@@ -409,9 +409,8 @@ timeout, leaving ~90 identical hover frames with only the last 5 labelled). Find
 
 ## 8. Not done yet / next steps
 Best (random plate colours, 150 episodes): `*9rc2` models, stationary pick 83 % / full 77 %, place after pick 93 %;
-push 31 % / 29 % (pushed cubes picked ~19 %). The defaults still serve `*9rc` (switch pending).
-1. **Switch the defaults** to `pick9rc2` / `place9rc2` and `--place_release hold` (the forced release is no longer
-   needed).
+push 31 % / 29 % (pushed cubes picked ~19 %). These are the defaults (forced release off).
+1. ~~Switch the defaults to `*9rc2`~~ done.
 2. **Pushes** are the largest gap and neither tracker changes nor 500 late-push demos helped. Next: look at what the
    pick model does after a late push (videos), more / more varied late-push data, or a pick retry in the executor
    (needs a reliable pick verdict: 54 % under pushes, 64 false passes).

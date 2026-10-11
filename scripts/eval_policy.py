@@ -2,7 +2,7 @@
 
 Defaults = the current pipeline: per episode find(cube), find(plate) (fused multi-view find), then pick and
 place with 9-D SAM2-tracked targets; each skill ends on the model's own [done, success] verdict read from the
-current frame (16 s limit; after a place success the gripper is opened), and every verdict is scored against the simulator. Start the server first:
+current frame (16 s limit), and every verdict is scored against the simulator. Start the server first:
 
     ~/lerobot-env/bin/python -m so101_lang.serve.policy_server          # current skill models by default
     OMNI_KIT_ACCEPT_EULA=YES ~/isaacsim/bin/python scripts/eval_policy.py --episodes 150 --seed 0 [--push]
@@ -47,10 +47,11 @@ parser.add_argument("--target_dim", type=int, choices=[3, 9], default=9,
                     help="Target sent to the policy: 3 = position, 9 = position + 6-D rotation (19-D state models).")
 parser.add_argument("--freeze_radius", type=float, default=0.03,
                     help="Pick target stops updating once the TCP is this close to it [m] (and when the gripper closes).")
-parser.add_argument("--place_release", choices=["hold", "open"], default="open",
+parser.add_argument("--place_release", choices=["hold", "open"], default="hold",
                     help="After a place success verdict, the 0.5 s hold before scoring keeps the last command (hold) or "
                          "commands the gripper open at the same pose (open). The place model's success label starts "
-                         "just before the release in the demos, so it can report success with the cube still held.")
+                         "just before the release in the older demos (*9rc models), so they could report success with the cube still "
+                         "held; *9rc2 releases on its own.")
 parser.add_argument("--home_grip", choices=["keep", "closed"], default="closed",
                     help="Gripper during the scripted return home after find(): closed = the pick start state seen in "
                          "training; keep = whatever opening find() left.")
@@ -79,7 +80,12 @@ parser.add_argument("--episode_length_s", type=float, default=None,
                          "+ 120 s for the find pipeline, whose find stage (and fused multi-view tour) comes on top.")
 parser.add_argument("--video_out", default="outputs/eval/episode0.mp4", help="Left-camera video of one episode.")
 parser.add_argument("--video_episode", type=int, default=0, help="Which episode to record to --video_out.")
+parser.add_argument("--video_episodes", default="",
+                    help="Comma-separated extra episodes to record (<video_out stem>_ep<N>.mp4) and trace per pick query "
+                         "(time, gripper-cube distance, target error, gripper command).")
 args, env_cfg = sim_app.parse(parser, TASK)
+DEBUG_EPS = {int(e) for e in args.video_episodes.split(",") if e.strip()}
+VIDEO_EPS = DEBUG_EPS | {args.video_episode}
 env_cfg.scene.num_envs = 1
 env_cfg.episode_length_s = args.episode_length_s or (2 * args.step_timeout + 2 + (120 if args.pipeline == "find" else 0))
 SUCCESS_FUNC = env_cfg.terminations.success.func
@@ -342,7 +348,7 @@ with sim_app.launch(env_cfg, args):
                 t += 1
                 if t % args.sam2_every == 0:
                     bg_track(head_b)
-                if ep == args.video_episode:
+                if ep in VIDEO_EPS:
                     frames_out.append(rgb("left_cam"))
                 if vd.update(a, k == 0):
                     break
@@ -419,7 +425,7 @@ with sim_app.launch(env_cfg, args):
             env.step(torch.cat([pos + (goal - pos) * a, quat, grip], -1))
             if on_step is not None and (k + 1) % args.sam2_every == 0:
                 on_step(head_b)
-            if ep == args.video_episode:
+            if ep in VIDEO_EPS:
                 frames_out.append(rgb("left_cam"))
 
     def go_home(home_link, head_b, steps=30, on_step=None):
@@ -654,6 +660,17 @@ with sim_app.launch(env_cfg, args):
                 conn.send(reply_req)
                 reply = conn.recv()
                 latencies.append(reply["t_total"])
+                if ep in DEBUG_EPS and skill == "pick":
+                    tcp, cubes = tcp_and_cubes_b()
+                    terr = (1000 * float(np.linalg.norm(target[:3] - oracle_target("pick", cube, plate, head_b)))
+                            if target is not None else float("nan"))
+                    cmd = reply["actions"][: args.exec_steps]
+                    print(f"[trace] ep {ep} t {t * env.step_dt:4.1f}s | tcp-cube dxy "
+                          f"{1000 * float(torch.linalg.norm(tcp[:2] - cubes[cube, :2])):3.0f}mm dz "
+                          f"{1000 * float(tcp[2] - cubes[cube, 2]):+4.0f}mm | target err {terr:3.0f}mm | grip cmd "
+                          f"{float(cmd[0][9]):.2f}->{float(cmd[-1][9]):.2f} | "
+                          f"push {'-' if push['start'] is None else ('sliding' if push['steps_left'] > 0 else 'done')}",
+                          flush=True)
                 for k, a in enumerate(torch.as_tensor(reply["actions"][: args.exec_steps], device=env.device)):
                     if skill == "place" and outcome.get("release") is None and float(a[9]) > 0.5:
                         outcome["release"] = place_snapshot(cube, plate, head_b, target)
@@ -700,7 +717,7 @@ with sim_app.launch(env_cfg, args):
                             and outcome.get("caught_up_t") is None and outcome["close"] is None
                             and np.linalg.norm(perceived["pick"] - oracle_target("pick", cube, plate, head_b)) < 0.015):
                         outcome["caught_up_t"] = t * env.step_dt  # tracked target back within 15 mm after the push
-                    if ep == args.video_episode:
+                    if ep in VIDEO_EPS:
                         frames_out.append(rgb("left_cam"))
                     lifted = float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) > rest_z + 0.03
                     if (skill == "place" and outcome.get("release") is None and outcome.get("dropped") is None
@@ -818,9 +835,11 @@ with sim_app.launch(env_cfg, args):
             close_txt += " | cube-plate dxy={:.0f}mm dz={:.0f}mm opening={:.2f}".format(*outcome["place_geom"])
         print(f"[eval] {ep:3d} '{outcome['goal']}': pick={'ok' if outcome['pick'] else 'FAIL'} "
               f"place={'ok' if outcome['place'] else 'FAIL'} | {close_txt}", flush=True)
-        if ep == args.video_episode and frames_out:
+        if ep in VIDEO_EPS and frames_out:
             os.makedirs(os.path.dirname(args.video_out), exist_ok=True)
-            imageio.mimsave(args.video_out, frames_out, fps=round(1 / env.step_dt))
+            path = args.video_out if ep == args.video_episode else args.video_out.replace(".mp4", f"_ep{ep}.mp4")
+            imageio.mimsave(path, frames_out, fps=round(1 / env.step_dt))
+        frames_out.clear()
 
     n = len(results)
     pick = sum(r["pick"] for r in results)

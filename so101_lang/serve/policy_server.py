@@ -89,8 +89,11 @@ def build_obs(msg: dict, depth) -> dict:
     return obs
 
 
-# Current skill models (random plate colours, 9-D targets, pass/fail verdict).
-DEFAULT_SKILLS = {sk: f"checkpoints/{sk}9rc_15000/checkpoints/last/pretrained_model" for sk in ("pick", "place", "find")}
+# Current skill models (random plate colours, 9-D targets, pass/fail verdict; pick / place retrained on the
+# post-release and late-push demos, 2026-10-11).
+DEFAULT_SKILLS = {"pick": "checkpoints/pick9rc2_15000/checkpoints/last/pretrained_model",
+                  "place": "checkpoints/place9rc2_15000/checkpoints/last/pretrained_model",
+                  "find": "checkpoints/find9rc_15000/checkpoints/last/pretrained_model"}
 
 
 def main():
