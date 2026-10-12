@@ -53,6 +53,10 @@ parser.add_argument("--pick_retries", type=int, default=2,
                          "to this many times. 0 = off (a missed grasp reported as success then runs place).")
 parser.add_argument("--grasp_min_opening", type=float, default=0.05,
                     help="Gripper opening below which the gripper is closed on nothing (holding a cube: ~0.10).")
+parser.add_argument("--release_gate", type=float, nargs=2, default=[0.04, 0.065], metavar=("DXY", "DZ"),
+                    help="Executor release gate [m]: a place 'open' command is overridden (gripper kept closed) while the "
+                         "TCP is more than DXY sideways from the perceived plate target or more than DZ above it (robot "
+                         "base frame). The expert releases ~0.03 m above the plate centre. 0 0 = off.")
 parser.add_argument("--place_release", choices=["hold", "open"], default="hold",
                     help="After a place success verdict, the 0.5 s hold before scoring keeps the last command (hold) or "
                          "commands the gripper open at the same pose (open). The place model's success label starts "
@@ -682,6 +686,19 @@ with sim_app.launch(env_cfg, args):
                           f"push {'-' if push['start'] is None else ('sliding' if push['steps_left'] > 0 else 'done')}",
                           flush=True)
                 for k, a in enumerate(torch.as_tensor(reply["actions"][: args.exec_steps], device=env.device)):
+                    if (skill == "place" and float(a[9]) > 0.05 and args.release_gate[0] > 0 and target is not None
+                            and outcome.get("release") is None):
+                        # Release gate: the place model sometimes opens mid-carry, far from the plate. Only let it
+                        # open over the (perceived) plate, at release height; otherwise keep holding. Any loosening
+                        # counts (the carry command is 0 = closed): a partly opened gripper already drops the cube.
+                        tcp_b_, _ = tcp_and_cubes_b()
+                        hb = head_b[0]
+                        tgt_b = hb[:3, :3] @ torch.as_tensor(np.asarray(target)[:3], device=env.device, dtype=hb.dtype) + hb[:3, 3]
+                        d = tcp_b_ - tgt_b
+                        if float(torch.linalg.norm(d[:2])) > args.release_gate[0] or float(d[2]) > args.release_gate[1]:
+                            a = a.clone()
+                            a[9] = 0.0
+                            outcome["release_gated"] = outcome.get("release_gated", 0) + 1
                     if skill == "place" and outcome.get("release") is None and float(a[9]) > 0.5:
                         outcome["release"] = place_snapshot(cube, plate, head_b, target)
                     if skill == "pick" and outcome["close"] is None and float(a[9]) < 0.5:
@@ -835,6 +852,8 @@ with sim_app.launch(env_cfg, args):
             if outcome["pick_retries"]:
                 close_txt += (f" | pick retries {outcome['pick_retries']}"
                               + (" (re-detect failed)" if outcome.get("retry_find_failed") else ""))
+            if outcome.get("release_gated"):
+                close_txt += f" | release gated {outcome['release_gated']} steps"
             if outcome.get("release_forced"):
                 close_txt += " | release forced after place verdict"
         if outcome["pick"] and not outcome["place"]:
@@ -896,6 +915,8 @@ with sim_app.launch(env_cfg, args):
     full = sum(r["place"] for r in results)
     print(f"[eval] pick success {pick}/{n} = {pick / n:.0%}; full pick+place {full}/{n} = {full / n:.0%}; "
           f"mean server latency {1000 * np.mean(latencies):.0f} ms")
+    rg = [r for r in results if r.get("release_gated")]
+    print(f"[eval] release gate: held closed in {len(rg)}/{n} episodes; placed afterwards {sum(r['place'] for r in rg)}")
     rt = [r for r in results if r.get("pick_retries")]
     print(f"[eval] pick retries: {len(rt)}/{n} episodes retried ({sum(r['pick_retries'] for r in rt)} retries); picked after a "
           f"retry {sum(r['pick'] for r in rt)}, full {sum(r['place'] for r in rt)}; re-detect failed "
