@@ -39,7 +39,8 @@ Design goals (from the project owner):
                   3 steps, the pick target freezes within 3 cm of the gripper. A skill ends when done > 0.5 on
                   2 consecutive current-frame readings, or after 16 s. Grasp check after pick: gripper
                   opening < 0.05 (closed on nothing) or no pass verdict → open, go home, re-detect the cube, pick
-                  again (up to 2 retries).
+                  again (up to 2 retries). Release gate: no gripper opening (> 0.05) while the TCP is more
+                  than 4 cm sideways / 6.5 cm above the perceived plate target.
         │ 10-D head-frame action
         ▼
  ⑤ SO101Adapter   head → base calibration, TCP offset, gripper opening → joint angle (so101_lang/robots/so101.py)
@@ -429,10 +430,26 @@ Paired vs no retry: stationary pick 12 wins / 0 losses, full 14 / 3; push pick 8
   not success.
 - Remaining stationary failures (23): place 10, find failed 6, pick 7.
 
+### Release gate in the executor (2026-10-13; defaults, 150 seeded episodes, same scenes)
+Place failures after a good pick (grasp check + retry, no gate; 20 in 300 episodes): early release mid-carry with
+a correct plate target 6, released at the plate edge 5, plate target drift 4, cube dropped during the carry 5. The
+gate (`--release_gate 0.04 0.065`, default) replaces any opening command above 0.05 with "closed" while the TCP is
+more than 4 cm sideways or 6.5 cm above the perceived plate target (base frame); the expert releases ~3 cm above
+the centre. A 0.5 threshold was too lenient: a partly opened gripper already drops the cube.
+
+| Executor | Stationary pick / full | Push pick / full | place failures after pick (still / push) |
+|---|---|---|---|
+| grasp check + retry | 91 % / 85 % | 87 % / 80 % | 10 / 10 |
+| **+ release gate (default)** | **91 % / 91 %** | **87 % / 87 %** | **1 / 1** |
+
+Paired full success vs no gate: stationary 11 wins / 2 losses, push 14 / 4. The gate held the gripper closed in
+12 / 9 episodes, all of which were then placed. It also removed the carry drops (the model loosens the grip
+before it is over the plate) and most edge releases (it can only release close to the target).
+
 ## 8. Not done yet / next steps
-Best (defaults: `*9rc2`, grasp check + retry, random plate colours, 150 episodes): stationary pick 91 % / full 85 %;
-push pick 87 % / full 80 % (pushed cubes picked 91 %).
-1. **Place** (10 failures / 150): released over / off the plate, bad plate target.
+Best (defaults: `*9rc2`, grasp check + retry, release gate, random plate colours, 150 episodes): stationary pick
+91 % / full 91 %; push pick 87 % / full 87 % (pushed cubes picked 90 %). Place fails after only 1 of 137 picks.
+1. **Pick** is now the limit (13 / 150 stationary): misses that the retries do not recover, re-detection failures.
 2. **Find failures** (6–9 / 150; blue cube sometimes not proposed by the detector) and find's "not found" verdict
    (never right).
 3. **Re-aiming during the descent** (data): the model still closes on schedule after a late push; retries cover it.
