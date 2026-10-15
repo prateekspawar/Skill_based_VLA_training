@@ -49,10 +49,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--src", required=True)
     ap.add_argument("--dst", required=True)
-    ap.add_argument("--skill", choices=list(language.SKILLS), required=True)
+    ap.add_argument("--skill", choices=list(language.SKILLS) + ["all"], required=True)
+    ap.add_argument("--episodes", default=None,
+                    help="JSON file with a list of source episode indices to keep (e.g. one task's episodes).")
     args = ap.parse_args()
     src, dst = Path(args.src), Path(args.dst)
-    k = list(language.SKILLS).index(args.skill)
+    k = list(language.SKILLS).index(args.skill) if args.skill != "all" else None
+    keep_eps = set(json.loads(Path(args.episodes).read_text())) if args.episodes else None
     if dst.exists():
         shutil.rmtree(dst)
     dst.mkdir(parents=True)
@@ -68,7 +71,10 @@ def main():
     for f in sorted((src / "data").rglob("*.parquet")):
         t = pq.read_table(f)
         skill = np.stack(t.column("skill_index").to_numpy(zero_copy_only=False)).reshape(-1)
-        t = t.filter(pa.array(skill == k))
+        mask = np.ones(len(skill), bool) if k is None else skill == k
+        if keep_eps is not None:
+            mask &= np.isin(t.column("episode_index").to_numpy(), list(keep_eps))
+        t = t.filter(pa.array(mask))
         kept[f] = t
         for e, n in zip(*np.unique(t.column("episode_index").to_numpy(), return_counts=True)):
             per_episode[int(e)] = per_episode.get(int(e), 0) + int(n)

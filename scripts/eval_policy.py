@@ -47,6 +47,11 @@ parser.add_argument("--target_dim", type=int, choices=[3, 9], default=9,
                     help="Target sent to the policy: 3 = position, 9 = position + 6-D rotation (19-D state models).")
 parser.add_argument("--freeze_radius", type=float, default=0.03,
                     help="Pick target stops updating once the TCP is this close to it [m] (and when the gripper closes).")
+parser.add_argument("--only_tasks", default=os.environ.get("SO101_ONLY_TASKS", ""),
+                    help="Run only episodes whose task is in this list, e.g. 'blue cube:blue plate;red cube:yellow plate' "
+                         "(the others are skipped and not counted; the seeded scene sequence stays the same).")
+parser.add_argument("--task_episodes", type=int, default=int(os.environ.get("SO101_TASK_EPISODES", 0)),
+                    help="With --only_tasks: stop after this many matching episodes (0 = run all --episodes).")
 parser.add_argument("--pick_retries", type=int, default=2,
                     help="Find pipeline: when pick ends without a cube in the hand (gripper opening below "
                          "--grasp_min_opening, or no pass verdict), open, go home, re-detect the cube and pick again, up "
@@ -517,6 +522,12 @@ with sim_app.launch(env_cfg, args):
         cube, plate = env.pp_task[0].tolist()
         cube_name = f"cube_{cube}"
         rest_z = float(env.scene[cube_name].data.root_pos_w.torch[0, 2])
+        if args.only_tasks:
+            if args.task_episodes and len(results) >= args.task_episodes:
+                break
+            wanted = {tuple(x.strip() for x in t.split(":")) for t in args.only_tasks.split(";") if t.strip()}
+            if (language.cube_ref(cube), second_query(plate)) not in wanted:
+                continue  # not one of the evaluated tasks
         steps = [("pick", language.skill_text("pick", object=language.cube_ref(cube))),
                  ("place", language.skill_text("stack", object=language.cube_ref(plate)) if STACK
                   else language.skill_text("place", target=language.plate_ref(plate, plate_colors())))]
