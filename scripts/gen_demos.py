@@ -197,7 +197,7 @@ with sim_app.launch(env_cfg, args):
             mv, cube, plate = buf["move"], *buf["task"]
             ph = int(expert.phase[i])
             if mv["active"] is None:
-                cube_b, plate_b = priv[i, cube, :3], priv[i, language.NUM_CUBES + plate, :3]
+                cube_b, plate_b = priv[i, cube, :3], priv[i, plate if STACK else language.NUM_CUBES + plate, :3]
                 early = (not mv["pick_late"] and ph == Phase.APPROACH and buf["steps"] * env.step_dt >= mv["pick_at"]
                          and float(torch.linalg.norm(tcp_b[i] - cube_b)) > 0.06)
                 late = mv["pick_late"] and ph == Phase.DESCEND and float(tcp_b[i, 2] - cube_b[2]) > 0.04

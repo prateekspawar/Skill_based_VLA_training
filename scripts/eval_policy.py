@@ -808,6 +808,8 @@ with sim_app.launch(env_cfg, args):
                     outcome["place_geom"] = (1000 * float(torch.linalg.norm(c[:2] - pl[:2])), 1000 * float(c[2] - pl[2]),
                                              float(adapter.opening_from_joint(robot.data.joint_pos.torch[:, 5])[0]))
                 truth = lifted if skill == "pick" else (on_plate() if not done else False)
+                if skill == "pick":
+                    outcome["pick"] = bool(outcome["pick"] or truth)  # lifted only during the 0.5 s hold
                 if skill == "place":
                     outcome["place"] = truth
                 verdicts[skill].append((vd.result if vd.result is not None else "timeout", truth))
