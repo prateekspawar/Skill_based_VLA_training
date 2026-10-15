@@ -91,6 +91,7 @@ with sim_app.launch(env_cfg, args):
     objects = CUBE_NAMES + PLATE_NAMES
     adapter = SO101Adapter()
     skill_ids = {name: i for i, name in enumerate(language.SKILLS)}
+    STACK = os.environ.get("SO101_TASK_MODE", "place") == "stack"
 
     def gripper_pose_b():
         pos, quat = math_utils.subtract_frame_transforms(
@@ -158,10 +159,12 @@ with sim_app.launch(env_cfg, args):
             },
             "steps": 0, "carry_steps": 0, "cube_pos": [], "plate_pos": [],
             "task": (cube, plate),
-            "goal": language.goal_instruction(cube, plate, plate_colors(i)),
+            "goal": language.goal_instruction(cube, plate, plate_colors(i), stack=STACK),
             "plate_colors": list(plate_colors(i) or language.PLATE_NAMES),
             "pick_text": language.random_skill_text("pick", object=language.cube_ref(cube)),
-            "place_text": language.random_skill_text("place", target=language.plate_ref(plate, plate_colors(i))),
+            # stacking (SO101_TASK_MODE=stack): the second skill is "stack" and its target the base cube `plate`
+            **({"stack_text": language.random_skill_text("stack", object=language.cube_ref(plate))} if STACK else
+               {"place_text": language.random_skill_text("place", target=language.plate_ref(plate, plate_colors(i)))}),
             "init_poses": init_poses[i],
             "left": [], "right": [], "state": [], "action": [], "joint_pos": [], "skill": [],
             "skip": True,
@@ -203,7 +206,7 @@ with sim_app.launch(env_cfg, args):
                     plan = plan_slide(i, CUBE_NAMES[cube], {k: v for k, v in clearance.items()})
                     if plan:
                         mv["active"] = {"name": CUBE_NAMES[cube], "start": plan[0], "delta": plan[1], "k": 0, "skill": "pick"}
-                elif (mv["place"] and ph == Phase.CARRY and buf["carry_steps"] * env.step_dt >= mv["place_at"]
+                elif (mv["place"] and not STACK and ph == Phase.CARRY and buf["carry_steps"] * env.step_dt >= mv["place_at"]
                         and float(torch.linalg.norm(tcp_b[i, :2] - plate_b[:2])) > 0.06):
                     mv["place"] = False
                     plan = plan_slide(i, PLATE_NAMES[plate], {k: v for k, v in plate_clearance.items()
@@ -224,6 +227,7 @@ with sim_app.launch(env_cfg, args):
         joint_pos = robot.data.joint_pos.torch
         state = adapter.state(link[:, :3], link[:, 3:7], joint_pos[:, 5], head_b).cpu().numpy()
         phase = expert.phase.clone()
+        expert.stack[:] = STACK
         ik_action = expert.act(obs["privileged"], env.pp_task, link)
         # Record the expert's command in the robot-agnostic form: commanded TCP pose + opening.
         cmd = adapter.to_agnostic(
@@ -242,10 +246,11 @@ with sim_app.launch(env_cfg, args):
             buf["state"].append(state[i])
             buf["action"].append(cmd[i])
             buf["joint_pos"].append(joint_np[i])
-            buf["skill"].append(skill_ids[phase_skill(int(phase[i]))])
+            sk_name = phase_skill(int(phase[i]))
+            buf["skill"].append(skill_ids["stack" if STACK and sk_name == "place" else sk_name])
             cube, plate = buf["task"]
             buf["cube_pos"].append(objs_h[i, cube])
-            buf["plate_pos"].append(objs_h[i, language.NUM_CUBES + plate])
+            buf["plate_pos"].append(objs_h[i, plate if STACK else language.NUM_CUBES + plate])  # stack: base cube
 
         ended = (terminated | truncated).nonzero().flatten()
         if len(ended) == 0:
@@ -257,7 +262,7 @@ with sim_app.launch(env_cfg, args):
             buf = buffers[i]
             if success[i] and saved < args.episodes and len(buf["action"]) > 10:
                 g = h5.create_group(f"episode_{saved:06d}")
-                for key in ("goal", "pick_text", "place_text"):
+                for key in ("goal", "pick_text", "stack_text" if STACK else "place_text"):
                     g.attrs[key] = buf[key]
                 g.attrs["cube_idx"], g.attrs["plate_idx"] = buf["task"]
                 g.attrs["plate_colors"] = buf["plate_colors"]

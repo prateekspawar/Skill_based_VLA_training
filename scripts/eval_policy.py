@@ -181,6 +181,16 @@ with sim_app.launch(env_cfg, args):
         """Plate colour names of the current episode (randomised plate colours) or None."""
         return env.pp_plate_colors[0] if hasattr(env, "pp_plate_colors") else None
 
+    # Stacking (SO101_TASK_MODE=stack): the second object is the base cube `plate` and the second skill "stack".
+    # Internally it keeps the "place" slot (targets, tracking, verdicts, outcome["place"] = final success).
+    STACK = os.environ.get("SO101_TASK_MODE", "place") == "stack"
+
+    def second_query(plate):
+        return language.cube_ref(plate) if STACK else language.plate_ref(plate, plate_colors())
+
+    def second_name(plate):
+        return f"cube_{plate}" if STACK else f"plate_{plate}"
+
     def state_now(head_b):
         pos, quat = math_utils.subtract_frame_transforms(
             robot.data.root_pos_w.torch, robot.data.root_quat_w.torch,
@@ -203,7 +213,7 @@ with sim_app.launch(env_cfg, args):
 
     def plate_b(plate):
         return math_utils.subtract_frame_transforms(
-            robot.data.root_pos_w.torch, robot.data.root_quat_w.torch, env.scene[f"plate_{plate}"].data.root_pos_w.torch
+            robot.data.root_pos_w.torch, robot.data.root_quat_w.torch, env.scene[second_name(plate)].data.root_pos_w.torch
         )[0][0]
 
     def place_snapshot(cube, plate, head_b, sent):
@@ -225,7 +235,7 @@ with sim_app.launch(env_cfg, args):
 
     def oracle_target(skill, cube, plate, head_b):
         """Target point in the head frame: the cube's centre for pick, the plate's centre for place."""
-        name = f"cube_{cube}" if skill == "pick" else f"plate_{plate}"
+        name = f"cube_{cube}" if skill == "pick" else second_name(plate)
         p_b = math_utils.subtract_frame_transforms(
             robot.data.root_pos_w.torch, robot.data.root_quat_w.torch, env.scene[name].data.root_pos_w.torch
         )[0]
@@ -237,7 +247,7 @@ with sim_app.launch(env_cfg, args):
 
     def perceive_target(skill, cube, plate, head_b):
         """Ask the server's perception (OWLv2 + stereo depth) where the named object is; log its error."""
-        query = language.cube_ref(cube) if skill == "pick" else language.plate_ref(plate, plate_colors())
+        query = language.cube_ref(cube) if skill == "pick" else second_query(plate)
         conn.send({"cmd": "locate", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": query})
         reply = conn.recv()
         err = 1000 * float(np.linalg.norm(reply["point"] - oracle_target(skill, cube, plate, head_b)))
@@ -273,7 +283,7 @@ with sim_app.launch(env_cfg, args):
 
     def sam2_targets(cmd, cube, plate, head_b, frozen=()):
         """Start or update SAM2 tracking of the episode's pick cube and place plate; returns head-frame points."""
-        queries = {"pick": language.cube_ref(cube), "place": language.plate_ref(plate, plate_colors())}
+        queries = {"pick": language.cube_ref(cube), "place": second_query(plate)}
         msg = {"cmd": cmd, "left": rgb("left_cam"), "right": rgb("right_cam"), "robot_points": robot_points_head(head_b)}
         if cmd == "sam2_start":
             msg["queries"] = [queries["pick"], queries["place"]]
@@ -508,8 +518,10 @@ with sim_app.launch(env_cfg, args):
         cube_name = f"cube_{cube}"
         rest_z = float(env.scene[cube_name].data.root_pos_w.torch[0, 2])
         steps = [("pick", language.skill_text("pick", object=language.cube_ref(cube))),
-                 ("place", language.skill_text("place", target=language.plate_ref(plate, plate_colors())))]
-        outcome = {"goal": language.goal_instruction(cube, plate, plate_colors()), "pick": False, "place": False, "close": None}
+                 ("place", language.skill_text("stack", object=language.cube_ref(plate)) if STACK
+                  else language.skill_text("place", target=language.plate_ref(plate, plate_colors())))]
+        outcome = {"goal": language.goal_instruction(cube, plate, plate_colors(), stack=STACK), "pick": False, "place": False,
+                   "close": None}
         # Perception looks at the scene once, before the arm moves (like a planner's first observation):
         # later views are occluded by the arm and the held cube. Plates never move; cubes only once grasped.
         perceived = (
@@ -530,7 +542,7 @@ with sim_app.launch(env_cfg, args):
                 conn.recv()
             poses = {}
             for i_obj, (sk, query, name) in enumerate((("pick", language.cube_ref(cube), f"cube_{cube}"),
-                                                      ("place", language.plate_ref(plate, plate_colors()), f"plate_{plate}"))):
+                                                      ("place", second_query(plate), second_name(plate)))):
                 seed_ = args.seed * 100000 + ep * 10 + 7 + i_obj
                 if args.find_views == "fused":
                     # Several views, no tracking during the tour; fuse the agreeing plausible detections.
@@ -596,7 +608,7 @@ with sim_app.launch(env_cfg, args):
             if not find_failed and args.find_views == "fused" and args.target == "sam2":
                 go_home(home_link, head_b)
                 static_targets.clear()
-                for sk, query in (("pick", language.cube_ref(cube)), ("place", language.plate_ref(plate, plate_colors()))):
+                for sk, query in (("pick", language.cube_ref(cube)), ("place", second_query(plate))):
                     conn.send({"cmd": "find_start", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": query,
                                "robot_points": robot_points_head(head_b), "prior_point": poses[sk][:3],
                                "base_point": poses[sk][:3]})
@@ -613,7 +625,7 @@ with sim_app.launch(env_cfg, args):
                 if args.target != "sam2":
                     perceived = {sk: v[:3] for sk, v in poses.items()}
         elif args.target_dim == 9:
-            truth = {"pick": truth_pose9(f"cube_{cube}", head_b), "place": truth_pose9(f"plate_{plate}", head_b)}
+            truth = {"pick": truth_pose9(f"cube_{cube}", head_b), "place": truth_pose9(second_name(plate), head_b)}
             if args.fold_cube_yaw:
                 truth["pick"] = fold_cube_yaw(truth["pick"], head_b)
             rot6d = {sk: v[3:] for sk, v in truth.items()}  # direct mode: rotation from the simulator
@@ -644,7 +656,8 @@ with sim_app.launch(env_cfg, args):
         while skill_i + 1 < len(steps):
             skill_i += 1
             skill, text = steps[skill_i]
-            conn.send({"cmd": "reset", "seed": args.seed * 100000 + ep * 10 + skill_i, "skill": skill})
+            conn.send({"cmd": "reset", "seed": args.seed * 100000 + ep * 10 + skill_i,
+                       "skill": "stack" if STACK and skill == "place" else skill})
             conn.recv()
             # The target is fixed for the whole skill (cube before grasp, plate is static).
             target = oracle_target(skill, cube, plate, head_b) if args.target == "oracle" else None
@@ -780,7 +793,7 @@ with sim_app.launch(env_cfg, args):
                 lifted = float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) > rest_z + 0.03
                 if skill == "place":
                     c = env.scene[cube_name].data.root_pos_w.torch[0]
-                    pl = env.scene[f"plate_{plate}"].data.root_pos_w.torch[0]
+                    pl = env.scene[second_name(plate)].data.root_pos_w.torch[0]
                     outcome["place_geom"] = (1000 * float(torch.linalg.norm(c[:2] - pl[:2])), 1000 * float(c[2] - pl[2]),
                                              float(adapter.opening_from_joint(robot.data.joint_pos.torch[:, 5])[0]))
                 truth = lifted if skill == "pick" else (on_plate() if not done else False)

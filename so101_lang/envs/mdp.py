@@ -59,9 +59,14 @@ def reset_layout_and_task(
     plate_z: float,
     margin: float = 0.01,
     pairs: list[tuple[int, int]] | None = None,
+    stack: bool = False,
 ):
-    """Scatter cubes and plates on the table without overlap, and pick a (cube, plate) task."""
+    """Scatter cubes and plates on the table without overlap, and pick a (cube, plate) task. ``stack``: the task is
+    (cube, base cube) instead: put the cube on top of another cube (``env.pp_stack``)."""
     task = _ensure_task_buffer(env)
+    env.pp_stack = stack
+    if stack:
+        pairs = [(c, b) for c in range(language.NUM_CUBES) for b in range(language.NUM_CUBES) if c != b]
     if env_ids is None or isinstance(env_ids, slice):
         env_ids = torch.arange(env.num_envs, device=env.device)[env_ids if isinstance(env_ids, slice) else slice(None)]
     pairs = pairs or [(c, p) for c in range(language.NUM_CUBES) for p in range(language.NUM_PLATES)]
@@ -93,7 +98,10 @@ def task_onehot(env: ManagerBasedEnv) -> torch.Tensor:
     """One-hot ``[cube (NUM_CUBES), plate (NUM_PLATES)]`` encoding of the episode's task."""
     task = _ensure_task_buffer(env)
     cube = torch.nn.functional.one_hot(task[:, 0], language.NUM_CUBES)
-    plate = torch.nn.functional.one_hot(task[:, 1], language.NUM_PLATES)
+    if getattr(env, "pp_stack", False):  # the second index is a base cube, not a plate
+        plate = torch.zeros(env.num_envs, language.NUM_PLATES, dtype=cube.dtype, device=env.device)
+    else:
+        plate = torch.nn.functional.one_hot(task[:, 1], language.NUM_PLATES)
     return torch.cat([cube, plate], dim=-1).float()
 
 
@@ -140,6 +148,28 @@ def target_on_plate(
     rest_z = plate_top_z + cube_half
     z_ok = (cubes[:, 2] > rest_z - 0.008) & (cubes[:, 2] < rest_z + 0.012)
     still = torch.linalg.norm(cube_vel, dim=-1) < 0.05
+    robot = env.scene[robot_cfg.name]
+    released = robot.data.joint_pos.torch[:, robot_cfg.joint_ids[0]] > gripper_open_threshold
+    return xy_ok & z_ok & still & released
+
+
+def target_on_cube(
+    env: ManagerBasedRLEnv,
+    cube_size: float,
+    xy_tol: float = 0.012,
+    gripper_open_threshold: float = 0.5,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=["gripper"]),
+) -> torch.Tensor:
+    """Stacking: target cube resting on top of the base cube (task[:, 1]), gripper released, cube nearly still."""
+    task = _ensure_task_buffer(env)
+    rows = torch.arange(env.num_envs, device=env.device)
+    pos = _positions_w(env, CUBE_NAMES)
+    top, base = pos[rows, task[:, 0]], pos[rows, task[:, 1]]
+    vel = torch.stack([env.scene[n].data.root_lin_vel_w.torch for n in CUBE_NAMES], dim=1)[rows, task[:, 0]]
+    xy_ok = torch.linalg.norm(top[:, :2] - base[:, :2], dim=-1) < xy_tol
+    dz = top[:, 2] - base[:, 2]
+    z_ok = (dz > cube_size - 0.006) & (dz < cube_size + 0.01)
+    still = torch.linalg.norm(vel, dim=-1) < 0.05
     robot = env.scene[robot_cfg.name]
     released = robot.data.joint_pos.torch[:, robot_cfg.joint_ids[0]] > gripper_open_threshold
     return xy_ok & z_ok & still & released

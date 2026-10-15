@@ -81,6 +81,7 @@ class PickPlaceExpert:
         self.place_offset = torch.zeros(num_envs, 3, device=device)  # added to the release point -> off the plate
         self.force_open = torch.zeros(num_envs, dtype=torch.bool, device=device)  # open the gripper now (slip / drop)
         self.freeze = torch.zeros(num_envs, dtype=torch.bool, device=device)  # stop making progress (stall)
+        self.stack = torch.zeros(num_envs, dtype=torch.bool, device=device)  # place target is a cube (stacking)
         self.recovering = torch.zeros(num_envs, dtype=torch.bool, device=device)  # lifting after the cube moved
         self.recover_xy = torch.zeros(num_envs, 2, device=device)
         self.recoveries = torch.zeros(num_envs, dtype=torch.long, device=device)  # per episode (for recording)
@@ -134,7 +135,9 @@ class PickPlaceExpert:
         cfg, rows = self.cfg, torch.arange(self.n, device=self.device)
         poses = privileged.view(self.n, -1, 7)
         cube = poses[rows, task[:, 0]]
-        plate = poses[rows, language.NUM_CUBES + task[:, 1]]
+        plate = poses[rows, language.NUM_CUBES + task[:, 1].clamp(max=language.NUM_PLATES - 1)]
+        if self.stack.any():  # stacking: the "plate" is the base cube task[:, 1]
+            plate = torch.where(self.stack.unsqueeze(-1), poses[rows, task[:, 1]], plate)
 
         cur_rot = math_utils.matrix_from_quat(gripper_pos_b[:, 3:7])
         tcp_now = gripper_pos_b[:, :3] + (cur_rot @ self.tcp_offset.unsqueeze(-1)).squeeze(-1)
@@ -161,7 +164,9 @@ class PickPlaceExpert:
         cube_top = self.pick_pos + torch.tensor([0.0, 0.0, cfg.grasp_depth], device=self.device) + self.grasp_offset
         hover = self.hover.unsqueeze(-1) * torch.tensor([0.0, 0.0, 1.0], device=self.device)
         place = plate[:, :3].clone() + self.place_offset
-        place[:, 2] += 0.004 + cfg.place_clearance + 0.015  # plate half-height + clearance + cube half
+        # plate half-height (cube: full half-height) + clearance + held cube half
+        place[:, 2] += torch.where(self.stack, torch.full_like(place[:, 2], 0.015), torch.full_like(place[:, 2], 0.004)) \
+            + cfg.place_clearance + 0.015
         goal = torch.where(
             (self.phase == Phase.APPROACH).unsqueeze(-1),
             cube_top + hover,

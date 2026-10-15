@@ -32,7 +32,10 @@ import pyarrow.parquet as pq
 from so101_lang import language
 from so101_lang.data.add_target_point import TARGET_NAMES, env_to_head
 
-FREEZE_RADIUS = {0: 0.05, 1: 0.06}  # skill index -> [m]
+FREEZE_RADIUS = {0: 0.05, 1: 0.06, 3: 0.06}  # skill index -> [m]
+# skill index -> which recorded object is its target: 0 = cube_pos (pick), 1 = plate_pos (place; for stack demos
+# plate_pos holds the base cube)
+TARGET_SLOT = {0: 0, 1: 1, 3: 1}
 
 
 def true_positions(ep, head_in_base):
@@ -50,13 +53,22 @@ def wrap_yaw(yaw: float) -> float:
     return float((yaw + np.pi) % (2 * np.pi) - np.pi)
 
 
+def is_stack(ep) -> bool:
+    return "stack_text" in ep.attrs
+
+
 def true_yaws(ep):
-    """Base-frame yaw of the episode's [cube, plate]: cube from its recorded orientation, plate 0 (symmetric)."""
+    """Base-frame yaw of the episode's [cube, plate]: cube from its recorded orientation, plate 0 (symmetric); for
+    stack demos the second object is the base cube (its recorded orientation)."""
     poses = ep["init_poses"][()]
-    x, y, z, w = poses[int(ep.attrs["cube_idx"]), 3:7]
-    yaw_env = np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
-    yaw_base = yaw_env - np.pi / 2  # the robot base is rotated +90 deg about z in the env frame
-    return np.array([wrap_yaw(yaw_base), 0.0])
+
+    def yaw_base(i):
+        x, y, z, w = poses[i, 3:7]
+        yaw_env = np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+        return wrap_yaw(yaw_env - np.pi / 2)  # the robot base is rotated +90 deg about z in the env frame
+
+    second = yaw_base(int(ep.attrs["plate_idx"])) if is_stack(ep) else 0.0
+    return np.array([yaw_base(int(ep.attrs["cube_idx"])), second])
 
 
 def rot6d_head(yaw_base: float, head_in_base: np.ndarray) -> np.ndarray:
@@ -78,7 +90,8 @@ def published_targets(pos, tcp, skill, rng, args):
     frozen = np.zeros(2, dtype=bool)
     out = np.zeros((T, 3), dtype=np.float32)
     for t in range(T):
-        s = int(skill[t])
+        s = TARGET_SLOT.get(int(skill[t]), 0)
+        fr = FREEZE_RADIUS.get(int(skill[t]), 0.05)
         for obj in (0, 1):
             if frozen[obj] or t % every[obj]:
                 continue
@@ -88,7 +101,7 @@ def published_targets(pos, tcp, skill, rng, args):
             else:
                 published[obj] = start[obj] + det_err[obj]
         # Freeze the active skill's target once the gripper is close (as eval does).
-        if np.linalg.norm(tcp[t] - published[s]) < FREEZE_RADIUS[s]:
+        if np.linalg.norm(tcp[t] - published[s]) < fr:
             frozen[s] = True
         out[t] = published[s]
     return out
@@ -126,7 +139,7 @@ def main():
     shutil.copytree(src / "meta", dst / "meta")
     head_in_base = np.array(json.loads((src / "meta" / "stereo_calibration.json").read_text())["head_in_base"])
 
-    positions, yaws = [], []  # per global episode index
+    positions, yaws, stacks = [], [], []  # per global episode index
     for path in args.raw:
         with h5py.File(path, "r") as h5:
             for n in sorted(h5.keys()):
@@ -139,6 +152,7 @@ def main():
                         pos = pos[keep]
                 positions.append(pos)
                 yaws.append(true_yaws(h5[n]))
+                stacks.append(is_stack(h5[n]))
 
     tables = [(f, pq.read_table(f)) for f in sorted((src / "data").rglob("*.parquet"))]
     all_states = []
@@ -159,10 +173,14 @@ def main():
                     err = rng.choice(yaw_samples) * rng.choice([-1.0, 1.0])
                 else:
                     err = rng.normal(0, args.yaw_sigma_deg)
-                noisy = yaws[int(e)] + np.deg2rad(np.array([err, 0.0]))
+                st = stacks[int(e)]
+                err2 = (rng.normal(0, args.yaw_sigma_deg) if args.yaw_noise == "gauss" else
+                        rng.choice(yaw_samples) * rng.choice([-1.0, 1.0])) if st else 0.0
+                noisy = yaws[int(e)] + np.deg2rad(np.array([err, err2]))
                 # Reported modulo the cube's 90 deg symmetry, as perception (locate9) does.
-                r6 = np.stack([rot6d_head(language.fold_yaw(noisy[0], "cube"), head_in_base), rot6d_head(0.0, head_in_base)])
-                target[rows, 3:] = r6[np.clip(skill[rows], 0, 1)]
+                second = rot6d_head(language.fold_yaw(noisy[1], "cube"), head_in_base) if st else rot6d_head(0.0, head_in_base)
+                r6 = np.stack([rot6d_head(language.fold_yaw(noisy[0], "cube"), head_in_base), second])
+                target[rows, 3:] = r6[[TARGET_SLOT.get(int(k), 0) for k in skill[rows]]]
         new_state = np.concatenate([state, target], axis=1)
         all_states.append(new_state)
         col = pa.FixedSizeListArray.from_arrays(pa.array(new_state.reshape(-1), pa.float32()), new_state.shape[1])

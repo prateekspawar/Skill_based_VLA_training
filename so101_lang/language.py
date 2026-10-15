@@ -95,6 +95,15 @@ SKILLS: dict[str, Skill] = {
         train_templates=["find the {object}", "look for the {object}", "locate the {object}"],
         heldout_templates=["where is the {object}", "search for the {object}"],
     ),
+    # Added later as a new skill (experiment 2: a new skill model next to the existing ones).
+    "stack": Skill(
+        name="stack",
+        description="Put the cube currently held in the gripper on top of the given cube and release it.",
+        params={"object": OBJECT_REFS},
+        canonical="stack it on the {object}",
+        train_templates=["stack it on the {object}", "put it on top of the {object}", "set it onto the {object}"],
+        heldout_templates=["place it on top of the {object}", "build a tower on the {object}"],
+    ),
 }
 
 # (cube, plate) pairs never sampled as a training episode; used by the "new combination" benchmark suite.
@@ -140,8 +149,11 @@ def plate_ref(plate_idx: int, colors=None) -> str:
     return f"{colors[plate_idx]} plate" if colors is not None else TARGET_REFS[plate_idx]
 
 
-def goal_instruction(cube_idx: int, plate_idx: int, colors=None) -> str:
-    """High-level user instruction for one pick-and-place episode (what the planner receives)."""
+def goal_instruction(cube_idx: int, plate_idx: int, colors=None, stack: bool = False) -> str:
+    """High-level user instruction for one episode (what the planner receives). ``stack``: ``plate_idx`` is the
+    index of the base cube."""
+    if stack:
+        return f"stack the {cube_ref(cube_idx)} on the {cube_ref(plate_idx)}"
     return f"put the {cube_ref(cube_idx)} on the {plate_ref(plate_idx, colors)}"
 
 

@@ -212,6 +212,8 @@ class EventsCfg:
             "cube_z": CUBE_Z,
             "plate_z": PLATE_Z,
             "pairs": language.train_pairs(),
+            # SO101_TASK_MODE=stack: put a cube on top of another cube (new skill "stack"); default place.
+            "stack": os.environ.get("SO101_TASK_MODE", "place") == "stack",
         },
     )
     if os.environ.get("SO101_RANDOM_PLATE_COLORS", "1") != "0" and not os.environ.get("SO101_PLATE_COLORS"):
@@ -254,10 +256,13 @@ class ObservationsCfg:
 class TerminationsCfg:
     time_out = DoneTerm(func=base_mdp.time_out, time_out=True)
     cube_dropped = DoneTerm(func=mdp.any_cube_dropped)
-    success = DoneTerm(
-        func=mdp.target_on_plate,
-        params={"plate_radius": PLATE_RADIUS, "plate_top_z": PLATE_TOP_Z, "cube_half": CUBE_SIZE / 2},
-    )
+    if os.environ.get("SO101_TASK_MODE", "place") == "stack":
+        success = DoneTerm(func=mdp.target_on_cube, params={"cube_size": CUBE_SIZE})
+    else:
+        success = DoneTerm(
+            func=mdp.target_on_plate,
+            params={"plate_radius": PLATE_RADIUS, "plate_top_z": PLATE_TOP_Z, "cube_half": CUBE_SIZE / 2},
+        )
 
 
 @configclass
