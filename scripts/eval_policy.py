@@ -73,6 +73,9 @@ parser.add_argument("--release_gate", type=float, nargs=2, default=[0.04, 0.065]
                     help="Executor release gate [m]: a place 'open' command is overridden (gripper kept closed) while the "
                          "TCP is more than DXY sideways from the perceived plate target or more than DZ above it (robot "
                          "base frame). The expert releases ~0.03 m above the plate centre. 0 0 = off.")
+parser.add_argument("--stack_release_gate", type=float, nargs=2, default=None, metavar=("DXY", "DZ"),
+                    help="Release gate for the stack skill (the base cube is a much smaller target than a plate); "
+                         "default: the same as --release_gate.")
 parser.add_argument("--place_release", choices=["hold", "open"], default="hold",
                     help="After a place success verdict, the 0.5 s hold before scoring keeps the last command (hold) or "
                          "commands the gripper open at the same pose (open). The place model's success label starts "
@@ -265,7 +268,9 @@ with sim_app.launch(env_cfg, args):
         compose_results.append(res)
         print(f"[compose] {ep:3d} '{instruction}': {'SUCCESS' if res['success'] else 'FAIL'} | sub-tasks on target "
               f"{sum(ok)}/{len(subtasks)} (final scene) | plan {'ok' if res['plan_ok'] else 'WRONG'}"
-              + ("" if res["valid"] else " (invalid)") + (f" | planner: {plan_info['raw']!r}" if not res["plan_ok"] else ""),
+              + ("" if res["valid"] else " (invalid)")
+              + f" | scene plates: {', '.join(language.plate_ref(j, plate_colors()) for j in range(language.NUM_PLATES))}"
+              + (f" | planner: {plan_info['raw']!r}" if not res["plan_ok"] else ""),
               flush=True)
 
     class Verdict:
@@ -835,7 +840,8 @@ with sim_app.launch(env_cfg, args):
                             hb = head_b[0]
                             tgt_b = hb[:3, :3] @ torch.as_tensor(np.asarray(target)[:3], device=env.device, dtype=hb.dtype) + hb[:3, 3]
                             d = tcp_b_ - tgt_b
-                            if float(torch.linalg.norm(d[:2])) > args.release_gate[0] or float(d[2]) > args.release_gate[1]:
+                            gate = args.stack_release_gate if MODE["stack"] and args.stack_release_gate else args.release_gate
+                        if float(torch.linalg.norm(d[:2])) > gate[0] or float(d[2]) > gate[1]:
                                 a = a.clone()
                                 a[9] = 0.0
                                 outcome["release_gated"] = outcome.get("release_gated", 0) + 1
