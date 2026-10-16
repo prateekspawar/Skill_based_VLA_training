@@ -195,15 +195,24 @@ with sim_app.launch(env_cfg, args):
         system = ("You are the task planner of a one-arm robot. Turn the user's instruction into a sequence of skill "
                   "calls. Use only these skills (JSON schema):\n" + language.skills_schema() + "\nObjects in the scene: "
                   + ", ".join(objects) + ". The gripper holds one cube at a time: every pick is followed by a place "
-                  "or a stack of that cube. Reply only with JSON: {\"calls\": [{\"skill\": name, \"args\": {param: value}}]}.")
-        body = {"model": args.planner_model, "stream": False, "format": "json", "think": False,
-                "options": {"temperature": 0, "num_gpu": 0},
+                  "or a stack of that cube. Reply only with JSON: {\"calls\": [{\"skill\": name, \"args\": {param: value}}]}.\n"
+                  # Two single-step examples (not the evaluated compositions): they shorten the model's reasoning,
+                  # which otherwise ran past the token budget on the plate-then-stack instruction.
+                  "Examples:\nput the green cube on the white plate -> {\"calls\": [{\"skill\": \"pick\", \"args\": "
+                  "{\"object\": \"green cube\"}}, {\"skill\": \"place\", \"args\": {\"target\": \"white plate\"}}]}\n"
+                  "stack the yellow cube on the red cube -> {\"calls\": [{\"skill\": \"pick\", \"args\": {\"object\": "
+                  "\"yellow cube\"}}, {\"skill\": \"stack\", \"args\": {\"object\": \"red cube\"}}]}")
+        # qwen3-vl reasons before answering whatever "think" says, so the token budget must cover the reasoning
+        # (CPU: ~7 tokens/s; the server runs on the CPU so it does not compete with the policy for GPU memory).
+        # No "format": "json": with it the reasoning model's answer comes back empty; the JSON is cut out instead.
+        body = {"model": args.planner_model, "stream": False,
+                "options": {"temperature": 0, "num_gpu": 0, "num_predict": 8000},
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": instruction}]}
         req = urllib.request.Request(args.ollama_url + "/api/chat", data=_json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=600) as r:
+        with urllib.request.urlopen(req, timeout=3000) as r:
             content = _json.loads(r.read())["message"]["content"]
-        return _json.loads(content).get("calls", []), content
+        return _json.loads(content[content.index("{"): content.rindex("}") + 1]).get("calls", []), content
 
     def calls_to_subtasks(calls):
         """[pick X, place/stack T, ...] -> [(cube, target, stack)]; find calls are implied by the executor."""
