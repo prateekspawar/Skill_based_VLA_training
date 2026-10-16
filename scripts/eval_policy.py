@@ -47,6 +47,15 @@ parser.add_argument("--target_dim", type=int, choices=[3, 9], default=9,
                     help="Target sent to the policy: 3 = position, 9 = position + 6-D rotation (19-D state models).")
 parser.add_argument("--freeze_radius", type=float, default=0.03,
                     help="Pick target stops updating once the TCP is this close to it [m] (and when the gripper closes).")
+parser.add_argument("--compose", choices=["none", "pairs", "plate_stack", "tower"], default="none",
+                    help="Composed multi-step tasks in one scene (experiment 3): pairs = two cubes onto the two plates; "
+                         "plate_stack = a cube onto a plate, then a second cube stacked on it; tower = a 3-cube tower. "
+                         "Each sub-task runs find -> pick -> place/stack; success is checked on the final scene.")
+parser.add_argument("--planner", choices=["oracle", "llm"], default="oracle",
+                    help="Composed tasks: the sub-task sequence from the instruction's template (oracle) or from the "
+                         "planner LLM (Ollama, --planner_model) given language.skills_schema() and the scene's objects.")
+parser.add_argument("--planner_model", default="qwen3-vl:8b")
+parser.add_argument("--ollama_url", default="http://localhost:11434")
 parser.add_argument("--only_tasks", default=os.environ.get("SO101_ONLY_TASKS", ""),
                     help="Run only episodes whose task is in this list, e.g. 'blue cube:blue plate;red cube:yellow plate' "
                          "(the others are skipped and not counted; the seeded scene sequence stays the same).")
@@ -58,6 +67,8 @@ parser.add_argument("--pick_retries", type=int, default=2,
                          "to this many times. 0 = off (a missed grasp reported as success then runs place).")
 parser.add_argument("--grasp_min_opening", type=float, default=0.05,
                     help="Gripper opening below which the gripper is closed on nothing (holding a cube: ~0.10).")
+parser.add_argument("--grasp_max_opening", type=float, default=0.5,
+                    help="Gripper opening above which it never closed (open: ~0.97), so it holds nothing either.")
 parser.add_argument("--release_gate", type=float, nargs=2, default=[0.04, 0.065], metavar=("DXY", "DZ"),
                     help="Executor release gate [m]: a place 'open' command is overridden (gripper kept closed) while the "
                          "TCP is more than DXY sideways from the perceived plate target or more than DZ above it (robot "
@@ -102,7 +113,8 @@ args, env_cfg = sim_app.parse(parser, TASK)
 DEBUG_EPS = {int(e) for e in args.video_episodes.split(",") if e.strip()}
 VIDEO_EPS = DEBUG_EPS | {args.video_episode}
 env_cfg.scene.num_envs = 1
-env_cfg.episode_length_s = args.episode_length_s or (2 * args.step_timeout + 2 + (120 if args.pipeline == "find" else 0))
+env_cfg.episode_length_s = args.episode_length_s or (2 * args.step_timeout + 2 + (120 if args.pipeline == "find" else 0)
+                                                     + (400 if args.compose != "none" else 0))
 SUCCESS_FUNC = env_cfg.terminations.success.func
 if args.verdict:
     # Place must run until the model reports, so the success term never terminates; it stays registered so the
@@ -131,7 +143,7 @@ with sim_app.launch(env_cfg, args):
     import random
 
     from so101_lang.envs.mdp import CUBE_NAMES, PLATE_NAMES
-    from so101_lang.envs.pick_place_env_cfg import CUBE_Z, PLATE_RADIUS, WORKSPACE_X, WORKSPACE_Y
+    from so101_lang.envs.pick_place_env_cfg import CUBE_SIZE, CUBE_Z, PLATE_RADIUS, PLATE_TOP_Z, WORKSPACE_X, WORKSPACE_Y
 
     if args.heldout_pairs:
         env_cfg.events.reset_layout_and_task.params["pairs"] = language.heldout_pairs()
@@ -156,7 +168,96 @@ with sim_app.launch(env_cfg, args):
     verdicts = {"pick": [], "place": [], "find": []}  # (verdict: True / False / "timeout", truth: bool)
 
     def on_plate():
+        if args.compose != "none":  # mixed place / stack sub-tasks: geometric check of the current sub-task
+            return object_on_target(*env.pp_task[0].tolist(), MODE["stack"])
         return bool(SUCCESS_FUNC(env, **env.termination_manager.get_term_cfg("success").params)[0])
+
+    def object_on_target(cube, target, stack):
+        """Cube resting on the plate `target` (or on top of cube `target`), same thresholds as the env's success terms."""
+        origin = env.scene.env_origins[0]
+        c = env.scene[f"cube_{cube}"].data.root_pos_w.torch[0] - origin
+        if stack:
+            b = env.scene[f"cube_{target}"].data.root_pos_w.torch[0] - origin
+            dz = float(c[2] - b[2])
+            return float(torch.linalg.norm(c[:2] - b[:2])) < 0.012 and CUBE_SIZE - 0.006 < dz < CUBE_SIZE + 0.01
+        pl = env.scene[f"plate_{target}"].data.root_pos_w.torch[0] - origin
+        rest = PLATE_TOP_Z + CUBE_SIZE / 2
+        return float(torch.linalg.norm(c[:2] - pl[:2])) < PLATE_RADIUS - 0.01 and rest - 0.008 < float(c[2]) < rest + 0.012
+
+    DEFAULT_STACK = MODE["stack"]
+    compose_results = []
+
+    def llm_plan(instruction, objects):
+        """Skill calls for the instruction from the planner LLM (Ollama chat API, JSON output, CPU)."""
+        import json as _json
+        import urllib.request
+
+        system = ("You are the task planner of a one-arm robot. Turn the user's instruction into a sequence of skill "
+                  "calls. Use only these skills (JSON schema):\n" + language.skills_schema() + "\nObjects in the scene: "
+                  + ", ".join(objects) + ". The gripper holds one cube at a time: every pick is followed by a place "
+                  "or a stack of that cube. Reply only with JSON: {\"calls\": [{\"skill\": name, \"args\": {param: value}}]}.")
+        body = {"model": args.planner_model, "stream": False, "format": "json", "think": False,
+                "options": {"temperature": 0, "num_gpu": 0},
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": instruction}]}
+        req = urllib.request.Request(args.ollama_url + "/api/chat", data=_json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=600) as r:
+            content = _json.loads(r.read())["message"]["content"]
+        return _json.loads(content).get("calls", []), content
+
+    def calls_to_subtasks(calls):
+        """[pick X, place/stack T, ...] -> [(cube, target, stack)]; find calls are implied by the executor."""
+        cubes = {language.cube_ref(i): i for i in range(language.NUM_CUBES)}
+        plates = {language.plate_ref(j, plate_colors()): j for j in range(language.NUM_PLATES)}
+        out, held = [], None
+        for c in calls:
+            name, a = c.get("skill"), c.get("args", {})
+            if name == "pick" and a.get("object") in cubes and held is None:
+                held = cubes[a["object"]]
+            elif name == "place" and a.get("target") in plates and held is not None:
+                out.append((held, plates[a["target"]], False)); held = None
+            elif name == "stack" and a.get("object") in cubes and held is not None:
+                out.append((held, cubes[a["object"]], True)); held = None
+            elif name != "find":
+                return None  # invalid call or order
+        return out if held is None else None
+
+    def make_subtasks(ep, head_b):
+        """The episode's sub-tasks [(cube, target, stack)], its instruction and planner info."""
+        if args.compose == "none":
+            cube, plate = env.pp_task[0].tolist()
+            return [(cube, plate, DEFAULT_STACK)], None, None
+        rng = np.random.default_rng(args.seed * 7777 + ep)
+        X, Y, Z = (int(i) for i in rng.permutation(language.NUM_CUBES)[:3])
+        A, B = (int(j) for j in rng.permutation(language.NUM_PLATES))
+        c, p = language.cube_ref, lambda j: language.plate_ref(j, plate_colors())
+        if args.compose == "pairs":
+            instr, oracle = f"put the {c(X)} on the {p(A)} and the {c(Y)} on the {p(B)}", [(X, A, False), (Y, B, False)]
+        elif args.compose == "plate_stack":
+            instr, oracle = f"put the {c(X)} on the {p(A)}, then stack the {c(Y)} on top of it", [(X, A, False), (Y, X, True)]
+        else:
+            instr, oracle = (f"stack the {c(Y)} on the {c(X)}, then put the {c(Z)} on top of the {c(Y)}",
+                             [(Y, X, True), (Z, Y, True)])
+        if args.planner == "oracle":
+            return oracle, instr, {"planner": "oracle", "plan_ok": True}
+        objects = [c(i) for i in range(language.NUM_CUBES)] + [p(j) for j in range(language.NUM_PLATES)]
+        try:
+            calls, raw = llm_plan(instr, objects)
+            sub = calls_to_subtasks(calls)
+        except Exception as e:  # unreachable server, malformed JSON
+            sub, raw = None, f"error: {e}"
+        return (sub or []), instr, {"planner": args.planner_model, "plan_ok": sub == oracle, "valid": sub is not None,
+                                    "raw": raw[:400]}
+
+    def compose_report(ep, instruction, plan_info, subtasks):
+        ok = [object_on_target(cu, tg, st) for cu, tg, st in subtasks]
+        res = {"plan_ok": plan_info["plan_ok"], "valid": plan_info.get("valid", True), "n": len(subtasks),
+               "done": sum(ok), "success": bool(subtasks) and all(ok)}
+        compose_results.append(res)
+        print(f"[compose] {ep:3d} '{instruction}': {'SUCCESS' if res['success'] else 'FAIL'} | sub-tasks on target "
+              f"{sum(ok)}/{len(subtasks)} (final scene) | plan {'ok' if res['plan_ok'] else 'WRONG'}"
+              + ("" if res["valid"] else " (invalid)") + (f" | planner: {plan_info['raw']!r}" if not res["plan_ok"] else ""),
+              flush=True)
 
     class Verdict:
         """Debounced [done, success] reading from the executed actions."""
@@ -188,13 +289,13 @@ with sim_app.launch(env_cfg, args):
 
     # Stacking (SO101_TASK_MODE=stack): the second object is the base cube `plate` and the second skill "stack".
     # Internally it keeps the "place" slot (targets, tracking, verdicts, outcome["place"] = final success).
-    STACK = os.environ.get("SO101_TASK_MODE", "place") == "stack"
+    MODE = {"stack": os.environ.get("SO101_TASK_MODE", "place") == "stack"}  # per sub-task in composed tasks
 
     def second_query(plate):
-        return language.cube_ref(plate) if STACK else language.plate_ref(plate, plate_colors())
+        return language.cube_ref(plate) if MODE["stack"] else language.plate_ref(plate, plate_colors())
 
     def second_name(plate):
-        return f"cube_{plate}" if STACK else f"plate_{plate}"
+        return f"cube_{plate}" if MODE["stack"] else f"plate_{plate}"
 
     def state_now(head_b):
         pos, quat = math_utils.subtract_frame_transforms(
@@ -519,423 +620,439 @@ with sim_app.launch(env_cfg, args):
         head_b = head_in_base(env)
         # One hold step so the cameras show the new layout (first post-reset render is stale).
         env.step(adapter.ik_command(state_now(head_b), head_b))
-        cube, plate = env.pp_task[0].tolist()
-        cube_name = f"cube_{cube}"
-        rest_z = float(env.scene[cube_name].data.root_pos_w.torch[0, 2])
-        if args.only_tasks:
-            if args.task_episodes and len(results) >= args.task_episodes:
-                break
-            wanted = {tuple(x.strip() for x in t.split(":")) for t in args.only_tasks.split(";") if t.strip()}
-            if (language.cube_ref(cube), second_query(plate)) not in wanted:
-                continue  # not one of the evaluated tasks
-        steps = [("pick", language.skill_text("pick", object=language.cube_ref(cube))),
-                 ("place", language.skill_text("stack", object=language.cube_ref(plate)) if STACK
-                  else language.skill_text("place", target=language.plate_ref(plate, plate_colors())))]
-        outcome = {"goal": language.goal_instruction(cube, plate, plate_colors(), stack=STACK), "pick": False, "place": False,
-                   "close": None}
-        # Perception looks at the scene once, before the arm moves (like a planner's first observation):
-        # later views are occluded by the arm and the held cube. Plates never move; cubes only once grasped.
-        perceived = (
-            {sk: perceive_target(sk, cube, plate, head_b) for sk in ("pick", "place")}
-            if args.target == "perception" else {}
-        )
-        ep_steps = 0
-        rot6d = {}
-        find_failed = False
-        if args.pipeline == "find":
-            home_link = math_utils.subtract_frame_transforms(
-                robot.data.root_pos_w.torch, robot.data.root_quat_w.torch,
-                robot.data.body_pos_w.torch[:, gi], robot.data.body_quat_w.torch[:, gi])
-            tracked.clear()
-            bg_ctx.update(cube=cube, plate=plate)
-            if args.target == "sam2":
-                conn.send({"cmd": "sam2_reset"})
-                conn.recv()
-            poses = {}
-            for i_obj, (sk, query, name) in enumerate((("pick", language.cube_ref(cube), f"cube_{cube}"),
-                                                      ("place", second_query(plate), second_name(plate)))):
-                seed_ = args.seed * 100000 + ep * 10 + 7 + i_obj
-                if args.find_views == "fused":
-                    # Several views, no tracking during the tour; fuse the agreeing plausible detections.
-                    obs = []
-                    for v in [None] + list(VIEW_POSES):
-                        if v is not None:
-                            go_to_view(VIEW_POSES[v], head_b)
-                        p_, ok_, _ = run_find(query, name, head_b, ep, seed_, use_model=v is None, start_tracker=False)
-                        if ok_:
-                            obs.append((p_, find_log[-1].get("total") or -1e9))
-                    outcome[f"find_{sk}_attempts"] = 1 + len(VIEW_POSES)
-                    if not obs:
-                        poses[sk], ok = None, False
+        subtasks, instruction, plan_info = make_subtasks(ep, head_b)
+        stop_all = False
+        for sub_i, (sub_cube, sub_target, sub_stack) in enumerate(subtasks):
+            MODE["stack"] = env.pp_stack = sub_stack
+            env.pp_task[0, 0], env.pp_task[0, 1] = sub_cube, sub_target
+            cube, plate = env.pp_task[0].tolist()
+            cube_name = f"cube_{cube}"
+            rest_z = float(env.scene[cube_name].data.root_pos_w.torch[0, 2])
+            if args.only_tasks:
+                if args.task_episodes and len(results) >= args.task_episodes:
+                    stop_all = True
+                    break
+                wanted = {tuple(x.strip() for x in t.split(":")) for t in args.only_tasks.split(";") if t.strip()}
+                if (language.cube_ref(cube), second_query(plate)) not in wanted:
+                    continue  # not one of the evaluated tasks
+            steps = [("pick", language.skill_text("pick", object=language.cube_ref(cube))),
+                     ("place", language.skill_text("stack", object=language.cube_ref(plate)) if MODE["stack"]
+                      else language.skill_text("place", target=language.plate_ref(plate, plate_colors())))]
+            outcome = {"goal": language.goal_instruction(cube, plate, plate_colors(), stack=MODE["stack"]), "pick": False, "place": False,
+                       "close": None}
+            # Perception looks at the scene once, before the arm moves (like a planner's first observation):
+            # later views are occluded by the arm and the held cube. Plates never move; cubes only once grasped.
+            perceived = (
+                {sk: perceive_target(sk, cube, plate, head_b) for sk in ("pick", "place")}
+                if args.target == "perception" else {}
+            )
+            ep_steps = 0
+            rot6d = {}
+            find_failed = False
+            if args.pipeline == "find":
+                home_link = math_utils.subtract_frame_transforms(
+                    robot.data.root_pos_w.torch, robot.data.root_quat_w.torch,
+                    robot.data.body_pos_w.torch[:, gi], robot.data.body_quat_w.torch[:, gi])
+                tracked.clear()
+                bg_ctx.update(cube=cube, plate=plate)
+                if args.target == "sam2":
+                    conn.send({"cmd": "sam2_reset"})
+                    conn.recv()
+                poses = {}
+                for i_obj, (sk, query, name) in enumerate((("pick", language.cube_ref(cube), f"cube_{cube}"),
+                                                          ("place", second_query(plate), second_name(plate)))):
+                    seed_ = args.seed * 100000 + ep * 10 + 7 + i_obj
+                    if args.find_views == "fused":
+                        # Several views, no tracking during the tour; fuse the agreeing plausible detections.
+                        obs = []
+                        for v in [None] + list(VIEW_POSES):
+                            if v is not None:
+                                go_to_view(VIEW_POSES[v], head_b)
+                            p_, ok_, _ = run_find(query, name, head_b, ep, seed_, use_model=v is None, start_tracker=False)
+                            if ok_:
+                                obs.append((p_, find_log[-1].get("total") or -1e9))
+                        outcome[f"find_{sk}_attempts"] = 1 + len(VIEW_POSES)
+                        if not obs:
+                            poses[sk], ok = None, False
+                        else:
+                            pts = np.array([o[0][:3] for o in obs])
+                            agree = [[k for k in range(len(obs)) if np.linalg.norm(pts[k] - pts[j]) < 0.02] for j in range(len(obs))]
+                            group = max(agree, key=lambda g: (len(g), max(obs[k][1] for k in g)))
+                            fused = np.median(pts[group], axis=0)
+                            best = max(group, key=lambda k: obs[k][1])
+                            poses[sk] = np.concatenate([fused, obs[best][0][3:]]).astype(np.float32)
+                            outcome[f"fused_{sk}"] = (len(group), len(obs))
+                            ok = True
+                        if not ok:
+                            find_failed = True
+                            outcome["find_failed"] = query
+                            break
+                        continue
+                    pose, ok, _ = run_find(query, name, head_b, ep, seed_)  # the find model's own view
+                    outcome[f"find_{sk}_attempts"] = 1
+                    views = list(VIEW_POSES)[: args.find_retries]
+                    if args.find_views == "all":
+                        # Look from every preset view as well and keep the best plausible match.
+                        tried = [(find_log[-1].get("total") or -1e9, ok, pose, None)]
+                        for v in views:
+                            go_to_view(VIEW_POSES[v], head_b, on_step=bg_track)
+                            p_, ok_, _ = run_find(query, name, head_b, ep, seed_, use_model=False)
+                            tried.append((find_log[-1].get("total") or -1e9, ok_, p_, v))
+                        outcome[f"find_{sk}_attempts"] = len(tried)
+                        good = [x for x in tried if x[1]]
+                        if good:
+                            best = max(good, key=lambda x: x[0])
+                            ok, pose = True, best[2]
+                            if best[3] != views[-1] if views else False:  # restart tracking at the chosen view
+                                if best[3] is None:
+                                    go_home(home_link, head_b, on_step=bg_track)
+                                else:
+                                    go_to_view(VIEW_POSES[best[3]], head_b, on_step=bg_track)
+                                pose, _, _ = run_find(query, name, head_b, ep, seed_, use_model=False)
+                        else:
+                            ok = False
                     else:
-                        pts = np.array([o[0][:3] for o in obs])
-                        agree = [[k for k in range(len(obs)) if np.linalg.norm(pts[k] - pts[j]) < 0.02] for j in range(len(obs))]
-                        group = max(agree, key=lambda g: (len(g), max(obs[k][1] for k in g)))
-                        fused = np.median(pts[group], axis=0)
-                        best = max(group, key=lambda k: obs[k][1])
-                        poses[sk] = np.concatenate([fused, obs[best][0][3:]]).astype(np.float32)
-                        outcome[f"fused_{sk}"] = (len(group), len(obs))
-                        ok = True
+                        for k_v, v in enumerate(views):  # retry: change the viewpoint, then look again
+                            if ok:
+                                break
+                            go_to_view(VIEW_POSES[v], head_b, on_step=bg_track)
+                            pose, ok, _ = run_find(query, name, head_b, ep, seed_, use_model=False)
+                            outcome[f"find_{sk}_attempts"] = k_v + 2
+                    poses[sk] = pose
                     if not ok:
                         find_failed = True
                         outcome["find_failed"] = query
                         break
-                    continue
-                pose, ok, _ = run_find(query, name, head_b, ep, seed_)  # the find model's own view
-                outcome[f"find_{sk}_attempts"] = 1
-                views = list(VIEW_POSES)[: args.find_retries]
-                if args.find_views == "all":
-                    # Look from every preset view as well and keep the best plausible match.
-                    tried = [(find_log[-1].get("total") or -1e9, ok, pose, None)]
-                    for v in views:
-                        go_to_view(VIEW_POSES[v], head_b, on_step=bg_track)
-                        p_, ok_, _ = run_find(query, name, head_b, ep, seed_, use_model=False)
-                        tried.append((find_log[-1].get("total") or -1e9, ok_, p_, v))
-                    outcome[f"find_{sk}_attempts"] = len(tried)
-                    good = [x for x in tried if x[1]]
-                    if good:
-                        best = max(good, key=lambda x: x[0])
-                        ok, pose = True, best[2]
-                        if best[3] != views[-1] if views else False:  # restart tracking at the chosen view
-                            if best[3] is None:
-                                go_home(home_link, head_b, on_step=bg_track)
-                            else:
-                                go_to_view(VIEW_POSES[best[3]], head_b, on_step=bg_track)
-                            pose, _, _ = run_find(query, name, head_b, ep, seed_, use_model=False)
-                    else:
-                        ok = False
-                else:
-                    for k_v, v in enumerate(views):  # retry: change the viewpoint, then look again
-                        if ok:
-                            break
-                        go_to_view(VIEW_POSES[v], head_b, on_step=bg_track)
-                        pose, ok, _ = run_find(query, name, head_b, ep, seed_, use_model=False)
-                        outcome[f"find_{sk}_attempts"] = k_v + 2
-                poses[sk] = pose
-                if not ok:
-                    find_failed = True
-                    outcome["find_failed"] = query
-                    break
-            if not find_failed and args.find_views == "fused" and args.target == "sam2":
-                go_home(home_link, head_b)
-                static_targets.clear()
-                for sk, query in (("pick", language.cube_ref(cube)), ("place", second_query(plate))):
-                    conn.send({"cmd": "find_start", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": query,
-                               "robot_points": robot_points_head(head_b), "prior_point": poses[sk][:3],
-                               "base_point": poses[sk][:3]})
-                    rep_ = conn.recv()
-                    if np.linalg.norm(rep_["pose9"][:3] - poses[sk][:3]) > 0.04:  # not (clearly) visible from home
-                        conn.send({"cmd": "sam2_remove", "query": query})
-                        conn.recv()
-                        static_targets[sk] = poses[sk][:3]
-                        outcome[f"static_{sk}"] = True
-                    elif query not in tracked:
-                        tracked.append(query)
-            if not find_failed:
-                rot6d = {sk: v[3:] for sk, v in poses.items()}
-                if args.target != "sam2":
-                    perceived = {sk: v[:3] for sk, v in poses.items()}
-        elif args.target_dim == 9:
-            truth = {"pick": truth_pose9(f"cube_{cube}", head_b), "place": truth_pose9(second_name(plate), head_b)}
-            if args.fold_cube_yaw:
-                truth["pick"] = fold_cube_yaw(truth["pick"], head_b)
-            rot6d = {sk: v[3:] for sk, v in truth.items()}  # direct mode: rotation from the simulator
-        if args.target == "sam2" and args.pipeline == "direct":
-            perceived = sam2_targets("sam2_start", cube, plate, head_b)  # both objects from the home view
-        if args.pipeline == "find" and not find_failed:
-            if args.find_views != "fused":
-                go_home(home_link, head_b, on_step=bg_track)  # both trackers keep running
-            if args.target == "sam2":
-                perceived = sam2_targets("sam2_update", cube, plate, head_b)
-                outcome["pick_target_start_err"] = 1000 * float(np.linalg.norm(perceived["pick"] - oracle_target("pick", cube, plate, head_b)))
-        rng = np.random.default_rng(args.seed * 1000 + ep)
-        place_init = [e for e in ep_track["place"] if e[0] in ("sam2_start", "find_start")]
-        outcome["place_init_err"] = place_init[-1][1] if place_init else None
-        push_at = rng.uniform(0.3, 1.0)  # [s] into the pick skill
-        outcome["push_mm"] = None
-        push = {"vel": None, "steps_left": 0, "start": None}
-        done = False
-        if not find_failed and rot6d.get("pick") is not None:
-            true_c = truth_pose9(f"cube_{cube}", head_b)
-            outcome["pick_start"] = {
-                "yaw_err": yaw_err_deg(np.concatenate([true_c[:3], rot6d["pick"]]), true_c, head_b, True),
-                "opening": float(state_now(head_b)[0, 9])}
-        if find_failed:
-            steps = []  # find() failed after all retries: stop and hold, report to the orchestrator
-        outcome["pick_retries"] = 0
-        skill_i = -1
-        while skill_i + 1 < len(steps):
-            skill_i += 1
-            skill, text = steps[skill_i]
-            conn.send({"cmd": "reset", "seed": args.seed * 100000 + ep * 10 + skill_i,
-                       "skill": "stack" if STACK and skill == "place" else skill})
-            conn.recv()
-            # The target is fixed for the whole skill (cube before grasp, plate is static).
-            target = oracle_target(skill, cube, plate, head_b) if args.target == "oracle" else None
-            if args.target in ("perception", "sam2"):
-                target = perceived[skill]
-            t, vd = 0, Verdict()
-            while t < max_steps and not done and vd.result is None:
-                # Dynamic targets: refresh before every query while the object can still move (pick: until
-                # the gripper starts closing on it; place: the plate, which normally stays put).
-                still_tracking = skill == "place" or outcome["close"] is None
-                if args.target == "sam2" and t > 0:
-                    # Freeze a target once the gripper is close to it: the gripper / held cube then overlaps the
-                    # object's mask, and an object about to be grasped or placed on cannot be re-targeted anyway.
-                    tcp_h = state_now(head_b)[0, :3].cpu().numpy()
-                    frozen = tuple(sk for sk, radius in (("pick", args.freeze_radius), ("place", 0.06))
-                                   if np.linalg.norm(tcp_h - perceived[sk]) < radius
-                                   or (sk == "pick" and outcome["close"] is not None))
-                    perceived = sam2_targets("sam2_update", cube, plate, head_b, frozen)
+                if not find_failed and args.find_views == "fused" and args.target == "sam2":
+                    go_home(home_link, head_b)
+                    static_targets.clear()
+                    for sk, query in (("pick", language.cube_ref(cube)), ("place", second_query(plate))):
+                        conn.send({"cmd": "find_start", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": query,
+                                   "robot_points": robot_points_head(head_b), "prior_point": poses[sk][:3],
+                                   "base_point": poses[sk][:3]})
+                        rep_ = conn.recv()
+                        if np.linalg.norm(rep_["pose9"][:3] - poses[sk][:3]) > 0.04:  # not (clearly) visible from home
+                            conn.send({"cmd": "sam2_remove", "query": query})
+                            conn.recv()
+                            static_targets[sk] = poses[sk][:3]
+                            outcome[f"static_{sk}"] = True
+                        elif query not in tracked:
+                            tracked.append(query)
+                if not find_failed:
+                    rot6d = {sk: v[3:] for sk, v in poses.items()}
+                    if args.target != "sam2":
+                        perceived = {sk: v[:3] for sk, v in poses.items()}
+            elif args.target_dim == 9:
+                truth = {"pick": truth_pose9(f"cube_{cube}", head_b), "place": truth_pose9(second_name(plate), head_b)}
+                if args.fold_cube_yaw:
+                    truth["pick"] = fold_cube_yaw(truth["pick"], head_b)
+                rot6d = {sk: v[3:] for sk, v in truth.items()}  # direct mode: rotation from the simulator
+            if args.target == "sam2" and args.pipeline == "direct":
+                perceived = sam2_targets("sam2_start", cube, plate, head_b)  # both objects from the home view
+            if args.pipeline == "find" and not find_failed:
+                if args.find_views != "fused":
+                    go_home(home_link, head_b, on_step=bg_track)  # both trackers keep running
+                if args.target == "sam2":
+                    perceived = sam2_targets("sam2_update", cube, plate, head_b)
+                    outcome["pick_target_start_err"] = 1000 * float(np.linalg.norm(perceived["pick"] - oracle_target("pick", cube, plate, head_b)))
+            rng = np.random.default_rng(args.seed * 1000 + ep)
+            place_init = [e for e in ep_track["place"] if e[0] in ("sam2_start", "find_start")]
+            outcome["place_init_err"] = place_init[-1][1] if place_init else None
+            push_at = rng.uniform(0.3, 1.0)  # [s] into the pick skill
+            outcome["push_mm"] = None
+            push = {"vel": None, "steps_left": 0, "start": None}
+            done = False
+            if not find_failed and rot6d.get("pick") is not None:
+                true_c = truth_pose9(f"cube_{cube}", head_b)
+                outcome["pick_start"] = {
+                    "yaw_err": yaw_err_deg(np.concatenate([true_c[:3], rot6d["pick"]]), true_c, head_b, True),
+                    "opening": float(state_now(head_b)[0, 9])}
+            if find_failed:
+                steps = []  # find() failed after all retries: stop and hold, report to the orchestrator
+            outcome["pick_retries"] = 0
+            skill_i = -1
+            while skill_i + 1 < len(steps):
+                skill_i += 1
+                skill, text = steps[skill_i]
+                conn.send({"cmd": "reset", "seed": args.seed * 100000 + ep * 10 + skill_i,
+                           "skill": "stack" if MODE["stack"] and skill == "place" else skill})
+                conn.recv()
+                # The target is fixed for the whole skill (cube before grasp, plate is static).
+                target = oracle_target(skill, cube, plate, head_b) if args.target == "oracle" else None
+                if args.target in ("perception", "sam2"):
                     target = perceived[skill]
-                if args.target == "oracle_tracked" and still_tracking:
-                    target = oracle_target(skill, cube, plate, head_b)
-                    sent = target
-                if target is not None and args.target_dim == 9:
-                    sent = np.concatenate([np.asarray(target, np.float32)[:3], np.asarray(rot6d[skill], np.float32)])
-                reply_req = {"left": rgb("left_cam"), "right": rgb("right_cam"), "state": state_now(head_b)[0].cpu().numpy(),
-                             "task": text, "target": sent}
-                conn.send(reply_req)
-                reply = conn.recv()
-                latencies.append(reply["t_total"])
-                if ep in DEBUG_EPS and skill == "pick":
-                    tcp, cubes = tcp_and_cubes_b()
-                    terr = (1000 * float(np.linalg.norm(target[:3] - oracle_target("pick", cube, plate, head_b)))
-                            if target is not None else float("nan"))
-                    cmd = reply["actions"][: args.exec_steps]
-                    print(f"[trace] ep {ep} t {t * env.step_dt:4.1f}s | tcp-cube dxy "
-                          f"{1000 * float(torch.linalg.norm(tcp[:2] - cubes[cube, :2])):3.0f}mm dz "
-                          f"{1000 * float(tcp[2] - cubes[cube, 2]):+4.0f}mm | target err {terr:3.0f}mm | grip cmd "
-                          f"{float(cmd[0][9]):.2f}->{float(cmd[-1][9]):.2f} | "
-                          f"push {'-' if push['start'] is None else ('sliding' if push['steps_left'] > 0 else 'done')}",
-                          flush=True)
-                for k, a in enumerate(torch.as_tensor(reply["actions"][: args.exec_steps], device=env.device)):
-                    if (skill == "place" and float(a[9]) > 0.05 and args.release_gate[0] > 0 and target is not None
-                            and outcome.get("release") is None):
-                        # Release gate: the place model sometimes opens mid-carry, far from the plate. Only let it
-                        # open over the (perceived) plate, at release height; otherwise keep holding. Any loosening
-                        # counts (the carry command is 0 = closed): a partly opened gripper already drops the cube.
-                        tcp_b_, _ = tcp_and_cubes_b()
-                        hb = head_b[0]
-                        tgt_b = hb[:3, :3] @ torch.as_tensor(np.asarray(target)[:3], device=env.device, dtype=hb.dtype) + hb[:3, 3]
-                        d = tcp_b_ - tgt_b
-                        if float(torch.linalg.norm(d[:2])) > args.release_gate[0] or float(d[2]) > args.release_gate[1]:
-                            a = a.clone()
-                            a[9] = 0.0
-                            outcome["release_gated"] = outcome.get("release_gated", 0) + 1
-                    if skill == "place" and outcome.get("release") is None and float(a[9]) > 0.5:
-                        outcome["release"] = place_snapshot(cube, plate, head_b, target)
-                    if skill == "pick" and outcome["close"] is None and float(a[9]) < 0.5:
-                        # First closing command: where is the TCP relative to the target / nearest cube?
-                        tcp, cubes = tcp_and_cubes_b()
-                        d = torch.linalg.norm(cubes[:, :2] - tcp[:2], dim=1)
-                        near = int(torch.argmin(d))
-                        outcome["close"] = (1000 * float(d[cube]), 1000 * float(tcp[2] - cubes[cube, 2]), language.CUBE_NAMES[near])
-                        outcome["close_t"] = t * env.step_dt
-                        st = state_now(head_b)[0].cpu().numpy()
-                        outcome["close_yaw"] = yaw_err_deg(st[:9], truth_pose9(f"cube_{cube}", head_b), head_b, True)
-                        if target is not None:
-                            outcome["target_err_at_close"] = 1000 * float(np.linalg.norm(target - oracle_target("pick", cube, plate, head_b)))
-                    _, _, term, trunc, _ = env.step(adapter.ik_command(a.unsqueeze(0), head_b))
-                    t += 1
-                    ep_steps += 1
-                    if (args.push and skill == "pick" and push["start"] is None and outcome["close"] is None
-                            and t * env.step_dt >= push_at):
-                        tcp, cubes = tcp_and_cubes_b()
-                        if float(torch.linalg.norm(cubes[cube] - tcp)) > 0.06:  # gripper still well away (3-D)
-                            push["vel"] = plan_push(cube, rng)
-                            push["start"] = env.scene[cube_name].data.root_pos_w.torch[0].clone()
-                            push["steps_left"] = round(PUSH_TIME / env.step_dt) if push["vel"] is not None else 0
-                    if push["steps_left"] > 0:
-                        push["steps_left"] -= 1
-                        n = round(PUSH_TIME / env.step_dt)
-                        drive_push(cube, push["start"], push["vel"], n - push["steps_left"], n)
-                        if push["steps_left"] == 0:  # slide finished: measure the actual displacement
-                            moved = env.scene[cube_name].data.root_pos_w.torch[0] - push["start"]
-                            outcome["push_mm"] = 1000 * float(torch.linalg.norm(moved[:2]))
-                            outcome["push_end_t"] = t * env.step_dt
-                            rest_z = float(env.scene[cube_name].data.root_pos_w.torch[0, 2])
-                            if args.target == "sam2":
-                                outcome["sam2_err_after_push"] = 1000 * float(np.linalg.norm(
-                                    perceived["pick"] - oracle_target("pick", cube, plate, head_b)))
-                    if (args.target == "sam2" and skill == "pick" and outcome["close"] is None
-                            and t % args.sam2_every == 0):
-                        # Feed SAM2 the motion between policy queries so masks follow moving objects.
+                t, vd = 0, Verdict()
+                while t < max_steps and not done and vd.result is None:
+                    # Dynamic targets: refresh before every query while the object can still move (pick: until
+                    # the gripper starts closing on it; place: the plate, which normally stays put).
+                    still_tracking = skill == "place" or outcome["close"] is None
+                    if args.target == "sam2" and t > 0:
+                        # Freeze a target once the gripper is close to it: the gripper / held cube then overlaps the
+                        # object's mask, and an object about to be grasped or placed on cannot be re-targeted anyway.
                         tcp_h = state_now(head_b)[0, :3].cpu().numpy()
-                        frozen = ("pick",) if np.linalg.norm(tcp_h - perceived["pick"]) < args.freeze_radius else ()
-                        perceived = sam2_targets("sam2_update", cube, plate, head_b, frozen + ("place",))
-                    if (args.target == "sam2" and skill == "pick" and outcome.get("push_end_t") is not None
-                            and outcome.get("caught_up_t") is None and outcome["close"] is None
-                            and np.linalg.norm(perceived["pick"] - oracle_target("pick", cube, plate, head_b)) < 0.015):
-                        outcome["caught_up_t"] = t * env.step_dt  # tracked target back within 15 mm after the push
-                    if ep in VIDEO_EPS:
-                        frames_out.append(rgb("left_cam"))
-                    lifted = float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) > rest_z + 0.03
-                    if (skill == "place" and outcome.get("release") is None and outcome.get("dropped") is None
-                            and float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) < rest_z + 0.01):
-                        outcome["dropped"] = t  # the cube is back on the table before any release command
-                    if skill == "pick" and lifted:
-                        if not outcome["pick"]:
-                            outcome["pick_lift_t"] = t * env.step_dt
-                        outcome["pick"] = True
-                    if term[0] or trunc[0]:
-                        # The env has already reset: read the success term's value from this step, not the new layout.
-                        outcome["place"] = bool(env.termination_manager.get_term("success")[0]) and not args.verdict
-                        done = True
-                        break
-                    if vd.update(a, k == 0):
+                        frozen = tuple(sk for sk, radius in (("pick", args.freeze_radius), ("place", 0.06))
+                                       if np.linalg.norm(tcp_h - perceived[sk]) < radius
+                                       or (sk == "pick" and outcome["close"] is not None))
+                        perceived = sam2_targets("sam2_update", cube, plate, head_b, frozen)
+                        target = perceived[skill]
+                    if args.target == "oracle_tracked" and still_tracking:
+                        target = oracle_target(skill, cube, plate, head_b)
+                        sent = target
+                    if target is not None and args.target_dim == 9:
+                        sent = np.concatenate([np.asarray(target, np.float32)[:3], np.asarray(rot6d[skill], np.float32)])
+                    reply_req = {"left": rgb("left_cam"), "right": rgb("right_cam"), "state": state_now(head_b)[0].cpu().numpy(),
+                                 "task": text, "target": sent}
+                    conn.send(reply_req)
+                    reply = conn.recv()
+                    latencies.append(reply["t_total"])
+                    if ep in DEBUG_EPS and skill == "pick":
                         tcp, cubes = tcp_and_cubes_b()
-                        outcome[f"{skill}_verdict_at"] = (t, 1000 * float(torch.linalg.norm(tcp - cubes[cube])),
-                                                          float(state_now(head_b)[0, 9]))
-                        break
+                        terr = (1000 * float(np.linalg.norm(target[:3] - oracle_target("pick", cube, plate, head_b)))
+                                if target is not None else float("nan"))
+                        cmd = reply["actions"][: args.exec_steps]
+                        print(f"[trace] ep {ep} t {t * env.step_dt:4.1f}s | tcp-cube dxy "
+                              f"{1000 * float(torch.linalg.norm(tcp[:2] - cubes[cube, :2])):3.0f}mm dz "
+                              f"{1000 * float(tcp[2] - cubes[cube, 2]):+4.0f}mm | target err {terr:3.0f}mm | grip cmd "
+                              f"{float(cmd[0][9]):.2f}->{float(cmd[-1][9]):.2f} | "
+                              f"push {'-' if push['start'] is None else ('sliding' if push['steps_left'] > 0 else 'done')}",
+                              flush=True)
+                    for k, a in enumerate(torch.as_tensor(reply["actions"][: args.exec_steps], device=env.device)):
+                        if (skill == "place" and float(a[9]) > 0.05 and args.release_gate[0] > 0 and target is not None
+                                and outcome.get("release") is None):
+                            # Release gate: the place model sometimes opens mid-carry, far from the plate. Only let it
+                            # open over the (perceived) plate, at release height; otherwise keep holding. Any loosening
+                            # counts (the carry command is 0 = closed): a partly opened gripper already drops the cube.
+                            tcp_b_, _ = tcp_and_cubes_b()
+                            hb = head_b[0]
+                            tgt_b = hb[:3, :3] @ torch.as_tensor(np.asarray(target)[:3], device=env.device, dtype=hb.dtype) + hb[:3, 3]
+                            d = tcp_b_ - tgt_b
+                            if float(torch.linalg.norm(d[:2])) > args.release_gate[0] or float(d[2]) > args.release_gate[1]:
+                                a = a.clone()
+                                a[9] = 0.0
+                                outcome["release_gated"] = outcome.get("release_gated", 0) + 1
+                        if skill == "place" and outcome.get("release") is None and float(a[9]) > 0.5:
+                            outcome["release"] = place_snapshot(cube, plate, head_b, target)
+                        if skill == "pick" and outcome["close"] is None and float(a[9]) < 0.5:
+                            # First closing command: where is the TCP relative to the target / nearest cube?
+                            tcp, cubes = tcp_and_cubes_b()
+                            d = torch.linalg.norm(cubes[:, :2] - tcp[:2], dim=1)
+                            near = int(torch.argmin(d))
+                            outcome["close"] = (1000 * float(d[cube]), 1000 * float(tcp[2] - cubes[cube, 2]), language.CUBE_NAMES[near])
+                            outcome["close_t"] = t * env.step_dt
+                            st = state_now(head_b)[0].cpu().numpy()
+                            outcome["close_yaw"] = yaw_err_deg(st[:9], truth_pose9(f"cube_{cube}", head_b), head_b, True)
+                            if target is not None:
+                                outcome["target_err_at_close"] = 1000 * float(np.linalg.norm(target - oracle_target("pick", cube, plate, head_b)))
+                        _, _, term, trunc, _ = env.step(adapter.ik_command(a.unsqueeze(0), head_b))
+                        t += 1
+                        ep_steps += 1
+                        if (args.push and skill == "pick" and push["start"] is None and outcome["close"] is None
+                                and t * env.step_dt >= push_at):
+                            tcp, cubes = tcp_and_cubes_b()
+                            if float(torch.linalg.norm(cubes[cube] - tcp)) > 0.06:  # gripper still well away (3-D)
+                                push["vel"] = plan_push(cube, rng)
+                                push["start"] = env.scene[cube_name].data.root_pos_w.torch[0].clone()
+                                push["steps_left"] = round(PUSH_TIME / env.step_dt) if push["vel"] is not None else 0
+                        if push["steps_left"] > 0:
+                            push["steps_left"] -= 1
+                            n = round(PUSH_TIME / env.step_dt)
+                            drive_push(cube, push["start"], push["vel"], n - push["steps_left"], n)
+                            if push["steps_left"] == 0:  # slide finished: measure the actual displacement
+                                moved = env.scene[cube_name].data.root_pos_w.torch[0] - push["start"]
+                                outcome["push_mm"] = 1000 * float(torch.linalg.norm(moved[:2]))
+                                outcome["push_end_t"] = t * env.step_dt
+                                rest_z = float(env.scene[cube_name].data.root_pos_w.torch[0, 2])
+                                if args.target == "sam2":
+                                    outcome["sam2_err_after_push"] = 1000 * float(np.linalg.norm(
+                                        perceived["pick"] - oracle_target("pick", cube, plate, head_b)))
+                        if (args.target == "sam2" and skill == "pick" and outcome["close"] is None
+                                and t % args.sam2_every == 0):
+                            # Feed SAM2 the motion between policy queries so masks follow moving objects.
+                            tcp_h = state_now(head_b)[0, :3].cpu().numpy()
+                            frozen = ("pick",) if np.linalg.norm(tcp_h - perceived["pick"]) < args.freeze_radius else ()
+                            perceived = sam2_targets("sam2_update", cube, plate, head_b, frozen + ("place",))
+                        if (args.target == "sam2" and skill == "pick" and outcome.get("push_end_t") is not None
+                                and outcome.get("caught_up_t") is None and outcome["close"] is None
+                                and np.linalg.norm(perceived["pick"] - oracle_target("pick", cube, plate, head_b)) < 0.015):
+                            outcome["caught_up_t"] = t * env.step_dt  # tracked target back within 15 mm after the push
+                        if ep in VIDEO_EPS:
+                            frames_out.append(rgb("left_cam"))
+                        lifted = float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) > rest_z + 0.03
+                        if (skill == "place" and outcome.get("release") is None and outcome.get("dropped") is None
+                                and float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) < rest_z + 0.01):
+                            outcome["dropped"] = t  # the cube is back on the table before any release command
+                        if skill == "pick" and lifted:
+                            if not outcome["pick"]:
+                                outcome["pick_lift_t"] = t * env.step_dt
+                            outcome["pick"] = True
+                        if term[0] or trunc[0]:
+                            # The env has already reset: read the success term's value from this step, not the new layout.
+                            outcome["place"] = bool(env.termination_manager.get_term("success")[0]) and not args.verdict
+                            done = True
+                            break
+                        if vd.update(a, k == 0):
+                            tcp, cubes = tcp_and_cubes_b()
+                            outcome[f"{skill}_verdict_at"] = (t, 1000 * float(torch.linalg.norm(tcp - cubes[cube])),
+                                                              float(state_now(head_b)[0, 9]))
+                            break
+                        if skill == "pick" and outcome["pick"] and not args.verdict:
+                            break
                     if skill == "pick" and outcome["pick"] and not args.verdict:
                         break
-                if skill == "pick" and outcome["pick"] and not args.verdict:
-                    break
-            outcome[f"{skill}_t"] = t * env.step_dt  # time this skill ran
-            if args.verdict:
-                if not done:  # hold the last command 0.5 s (as the robot does after a verdict), then check the truth
-                    hold = a.clone()
-                    if skill == "place" and vd.result is True and args.place_release == "open":
-                        hold[9] = 1.0  # success means "release": open at the same pose
-                        outcome["release_forced"] = outcome.get("release") is None
-                    for _ in range(10):
-                        env.step(adapter.ik_command(hold.unsqueeze(0), head_b))
-                lifted = float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) > rest_z + 0.03
-                if skill == "place":
-                    c = env.scene[cube_name].data.root_pos_w.torch[0]
-                    pl = env.scene[second_name(plate)].data.root_pos_w.torch[0]
-                    outcome["place_geom"] = (1000 * float(torch.linalg.norm(c[:2] - pl[:2])), 1000 * float(c[2] - pl[2]),
-                                             float(adapter.opening_from_joint(robot.data.joint_pos.torch[:, 5])[0]))
-                truth = lifted if skill == "pick" else (on_plate() if not done else False)
-                if skill == "pick":
-                    outcome["pick"] = bool(outcome["pick"] or truth)  # lifted only during the 0.5 s hold
-                if skill == "place":
-                    outcome["place"] = truth
-                verdicts[skill].append((vd.result if vd.result is not None else "timeout", truth))
-                outcome[f"{skill}_verdict"] = verdicts[skill][-1]
-                if skill == "pick" and not done and args.pipeline == "find":
-                    # Grasp check from proprioception: a gripper closed on nothing has opening ~0, one holding the
-                    # cube ~0.10. The pick model reports success after many misses, so this decides, not the verdict.
-                    opening = float(state_now(head_b)[0, 9])
-                    holding = opening >= args.grasp_min_opening and vd.result is True
-                    outcome.setdefault("grasp_checks", []).append(round(opening, 3))
-                    if not holding and outcome["pick_retries"] < args.pick_retries:
-                        outcome["pick_retries"] += 1
-                        outcome.setdefault("first_close", outcome["close"])
-                        open_cmd = state_now(head_b)[0].clone()
-                        open_cmd[9] = 1.0  # let go of anything, then back to the pick start pose
+                outcome[f"{skill}_t"] = t * env.step_dt  # time this skill ran
+                if args.verdict:
+                    if not done:  # hold the last command 0.5 s (as the robot does after a verdict), then check the truth
+                        hold = a.clone()
+                        if skill == "place" and vd.result is True and args.place_release == "open":
+                            hold[9] = 1.0  # success means "release": open at the same pose
+                            outcome["release_forced"] = outcome.get("release") is None
                         for _ in range(10):
-                            env.step(adapter.ik_command(open_cmd.unsqueeze(0), head_b))
-                        go_home(home_link, head_b)
-                        # Re-detect the cube (fresh detection + tracker) from home, else from the preset views.
-                        q, seed_r = language.cube_ref(cube), args.seed * 100000 + ep * 10 + 5
-                        pose_r, ok_r, _ = run_find(q, f"cube_{cube}", head_b, ep, seed_r, use_model=False)
-                        for v in ([] if ok_r else list(VIEW_POSES)):
-                            go_to_view(VIEW_POSES[v], head_b, on_step=bg_track)
+                            env.step(adapter.ik_command(hold.unsqueeze(0), head_b))
+                    lifted = float(env.scene[cube_name].data.root_pos_w.torch[0, 2]) > rest_z + 0.03
+                    if skill == "place":
+                        c = env.scene[cube_name].data.root_pos_w.torch[0]
+                        pl = env.scene[second_name(plate)].data.root_pos_w.torch[0]
+                        outcome["place_geom"] = (1000 * float(torch.linalg.norm(c[:2] - pl[:2])), 1000 * float(c[2] - pl[2]),
+                                                 float(adapter.opening_from_joint(robot.data.joint_pos.torch[:, 5])[0]))
+                    truth = lifted if skill == "pick" else (on_plate() if not done else False)
+                    if skill == "pick":
+                        outcome["pick"] = bool(outcome["pick"] or truth)  # lifted only during the 0.5 s hold
+                    if skill == "place":
+                        outcome["place"] = truth
+                    verdicts[skill].append((vd.result if vd.result is not None else "timeout", truth))
+                    outcome[f"{skill}_verdict"] = verdicts[skill][-1]
+                    if skill == "pick" and not done and args.pipeline == "find":
+                        # Grasp check from proprioception: a gripper closed on nothing has opening ~0, one holding the
+                        # cube ~0.10. The pick model reports success after many misses, so this decides, not the verdict.
+                        opening = float(state_now(head_b)[0, 9])
+                        holding = args.grasp_min_opening <= opening <= args.grasp_max_opening and vd.result is True
+                        outcome.setdefault("grasp_checks", []).append(round(opening, 3))
+                        if not holding and outcome["pick_retries"] < args.pick_retries:
+                            outcome["pick_retries"] += 1
+                            outcome.setdefault("first_close", outcome["close"])
+                            open_cmd = state_now(head_b)[0].clone()
+                            open_cmd[9] = 1.0  # let go of anything, then back to the pick start pose
+                            for _ in range(10):
+                                env.step(adapter.ik_command(open_cmd.unsqueeze(0), head_b))
+                            go_home(home_link, head_b)
+                            # Re-detect the cube (fresh detection + tracker) from home, else from the preset views.
+                            q, seed_r = language.cube_ref(cube), args.seed * 100000 + ep * 10 + 5
                             pose_r, ok_r, _ = run_find(q, f"cube_{cube}", head_b, ep, seed_r, use_model=False)
-                            if ok_r:
+                            for v in ([] if ok_r else list(VIEW_POSES)):
+                                go_to_view(VIEW_POSES[v], head_b, on_step=bg_track)
+                                pose_r, ok_r, _ = run_find(q, f"cube_{cube}", head_b, ep, seed_r, use_model=False)
+                                if ok_r:
+                                    break
+                            if not ok_r:
+                                outcome["retry_find_failed"] = True
                                 break
-                        if not ok_r:
-                            outcome["retry_find_failed"] = True
-                            break
-                        go_home(home_link, head_b, on_step=bg_track)  # (no-op if found from home) tracker keeps running
-                        static_targets.pop("pick", None)
-                        perceived = sam2_targets("sam2_update", cube, plate, head_b)
-                        rot6d["pick"] = pose_r[3:]
-                        outcome["close"], outcome["pick"] = None, False
-                        rest_z = float(env.scene[cube_name].data.root_pos_w.torch[0, 2])
-                        steps.insert(skill_i + 1, (skill, text))
-                        continue
-                    if not holding:
-                        break  # missed and out of retries: do not run place with an empty gripper
-                if vd.result is not True:
-                    break  # failed / timed out: stop and hold, the orchestrator decides what next
-                continue
-            if done or (skill == "pick" and not outcome["pick"]):
-                break
-        outcome["time_out_resets"] = time_out_resets[0] - ep_time_outs0
-        results.append(outcome)
-        close = outcome["close"]
-        close_txt = (f"close: target dxy={close[0]:.0f}mm dz={close[1]:+.0f}mm nearest={close[2]}" if close else "never closed")
-        if outcome["push_mm"]:
-            close_txt += f" | pushed {outcome['push_mm']:.0f}mm"
-            if outcome.get("push_end_t") is not None:
-                fmt = lambda x: "never" if x is None else f"{x:.1f}s"
-                close_txt += (f" (push end {fmt(outcome['push_end_t'])}, target caught up "
-                              f"{fmt(outcome.get('caught_up_t'))}, close {fmt(outcome.get('close_t'))})")
-        if outcome.get("target_err_at_close") is not None:
-            close_txt += f" | target err at close {outcome['target_err_at_close']:.0f}mm"
-        if args.verdict:
-            close_txt += " | verdicts " + " ".join(f"{sk}={outcome[f'{sk}_verdict'][0]}/{outcome[f'{sk}_verdict'][1]}"
-                                                     for sk in ("pick", "place") if f"{sk}_verdict" in outcome)
-            close_txt += " | time " + " ".join(f"{sk} {outcome[f'{sk}_t']:.1f}s" for sk in ("pick", "place")
-                                               if f"{sk}_t" in outcome)
-            if outcome.get("pick_lift_t") is not None:
-                close_txt += f" (lifted at {outcome['pick_lift_t']:.1f}s)"
-            if outcome.get("grasp_checks"):
-                close_txt += f" | grasp check opening {outcome['grasp_checks']}"
-            if outcome["pick_retries"]:
-                close_txt += (f" | pick retries {outcome['pick_retries']}"
-                              + (" (re-detect failed)" if outcome.get("retry_find_failed") else ""))
-            if outcome.get("release_gated"):
-                close_txt += f" | release gated {outcome['release_gated']} steps"
-            if outcome.get("release_forced"):
-                close_txt += " | release forced after place verdict"
-        if outcome["pick"] and not outcome["place"]:
-            r = outcome.get("release")
-            if outcome.get("dropped") is not None:
-                cause = "dropped before release"
-            elif r is None:
-                cause = "never released"
-            elif r["target_err"] is not None and r["target_err"] > 30:
-                cause = "bad plate target"
-            elif r["tcp_plate_dxy"] > 35:
-                cause = "released off the plate (target ok)"
-            elif not r["cube_in_hand"]:
-                cause = "cube not in hand at release"
-            else:
-                cause = "released over the plate"
-            outcome["place_cause"] = cause
-            if r:
-                close_txt += (f" | release: tcp-plate dxy={r['tcp_plate_dxy']:.0f}mm dz={r['tcp_plate_dz']:.0f}mm "
-                              f"target err={r['target_err'] if r['target_err'] is None else round(r['target_err'])}mm "
-                              f"in hand={r['cube_in_hand']} near={r['near']}")
-            if outcome.get("place_init_err") is not None:
-                upd = [e for e in ep_track["place"] if e[0] == "sam2_update"]
-                close_txt += (f" | plate target at start {outcome['place_init_err']:.0f}mm, max during tracking "
-                              f"{max([e[1] for e in upd], default=0):.0f}mm ({len(upd)} updates)")
-            close_txt += f" | PLACE FAIL: {cause}"
-        if not outcome["pick"] and outcome.get("pick_target_start_err") is not None:
-            fs = [e[1] for e in ep_track["pick"] if e[0] == "find_start"]
-            bg = [e for e in ep_track["pick"] if e[0] == "sam2_update"]
-            bgm = max([e[1] for e in ep_track["pick"] if e[0] == "bg"], default=0)
-            close_txt += (f" | cube target: at find {fs[-1] if fs else float('nan'):.0f}mm, max during plate find/home "
-                          f"{bgm:.0f}mm, at pick start "
-                          f"{outcome['pick_target_start_err']:.0f}mm")
-        if outcome.get("pick_start"):
-            close_txt += (f" | pick start: target yaw err {outcome['pick_start']['yaw_err']:.0f}deg, gripper opening "
-                          f"{outcome['pick_start']['opening']:.2f}")
-        if outcome.get("close_yaw") is not None:
-            close_txt += f" | jaw-cube yaw at close {outcome['close_yaw']:.0f}deg"
-        if not outcome["pick"] and outcome.get("pick_verdict_at"):
-            t_, d_, o_ = outcome["pick_verdict_at"]
-            close_txt += f" | pick verdict at step {t_}: tcp-cube {d_:.0f}mm, gripper opening {o_:.2f}"
-        if outcome.get("find_failed"):
-            close_txt += f" | FIND FAILED: {outcome['find_failed']}"
-        retries = [outcome.get(f"find_{sk}_attempts", 1) - 1 for sk in ("pick", "place")]
-        if any(retries):
-            close_txt += f" | find retries cube={retries[0]} plate={retries[1]}"
-        if outcome.get("place_geom"):
-            close_txt += " | cube-plate dxy={:.0f}mm dz={:.0f}mm opening={:.2f}".format(*outcome["place_geom"])
-        print(f"[eval] {ep:3d} '{outcome['goal']}': pick={'ok' if outcome['pick'] else 'FAIL'} "
-              f"place={'ok' if outcome['place'] else 'FAIL'} | {close_txt}", flush=True)
-        if ep in VIDEO_EPS and frames_out:
-            os.makedirs(os.path.dirname(args.video_out), exist_ok=True)
-            path = args.video_out if ep == args.video_episode else args.video_out.replace(".mp4", f"_ep{ep}.mp4")
-            imageio.mimsave(path, frames_out, fps=round(1 / env.step_dt))
+                            go_home(home_link, head_b, on_step=bg_track)  # (no-op if found from home) tracker keeps running
+                            static_targets.pop("pick", None)
+                            perceived = sam2_targets("sam2_update", cube, plate, head_b)
+                            rot6d["pick"] = pose_r[3:]
+                            outcome["close"], outcome["pick"] = None, False
+                            rest_z = float(env.scene[cube_name].data.root_pos_w.torch[0, 2])
+                            steps.insert(skill_i + 1, (skill, text))
+                            continue
+                        if not holding:
+                            break  # missed and out of retries: do not run place with an empty gripper
+                    if vd.result is not True:
+                        break  # failed / timed out: stop and hold, the orchestrator decides what next
+                    continue
+                if done or (skill == "pick" and not outcome["pick"]):
+                    break
+            outcome["time_out_resets"] = time_out_resets[0] - ep_time_outs0
+            results.append(outcome)
+            close = outcome["close"]
+            close_txt = (f"close: target dxy={close[0]:.0f}mm dz={close[1]:+.0f}mm nearest={close[2]}" if close else "never closed")
+            if outcome["push_mm"]:
+                close_txt += f" | pushed {outcome['push_mm']:.0f}mm"
+                if outcome.get("push_end_t") is not None:
+                    fmt = lambda x: "never" if x is None else f"{x:.1f}s"
+                    close_txt += (f" (push end {fmt(outcome['push_end_t'])}, target caught up "
+                                  f"{fmt(outcome.get('caught_up_t'))}, close {fmt(outcome.get('close_t'))})")
+            if outcome.get("target_err_at_close") is not None:
+                close_txt += f" | target err at close {outcome['target_err_at_close']:.0f}mm"
+            if args.verdict:
+                close_txt += " | verdicts " + " ".join(f"{sk}={outcome[f'{sk}_verdict'][0]}/{outcome[f'{sk}_verdict'][1]}"
+                                                         for sk in ("pick", "place") if f"{sk}_verdict" in outcome)
+                close_txt += " | time " + " ".join(f"{sk} {outcome[f'{sk}_t']:.1f}s" for sk in ("pick", "place")
+                                                   if f"{sk}_t" in outcome)
+                if outcome.get("pick_lift_t") is not None:
+                    close_txt += f" (lifted at {outcome['pick_lift_t']:.1f}s)"
+                if outcome.get("grasp_checks"):
+                    close_txt += f" | grasp check opening {outcome['grasp_checks']}"
+                if outcome["pick_retries"]:
+                    close_txt += (f" | pick retries {outcome['pick_retries']}"
+                                  + (" (re-detect failed)" if outcome.get("retry_find_failed") else ""))
+                if outcome.get("release_gated"):
+                    close_txt += f" | release gated {outcome['release_gated']} steps"
+                if outcome.get("release_forced"):
+                    close_txt += " | release forced after place verdict"
+            if outcome["pick"] and not outcome["place"]:
+                r = outcome.get("release")
+                if outcome.get("dropped") is not None:
+                    cause = "dropped before release"
+                elif r is None:
+                    cause = "never released"
+                elif r["target_err"] is not None and r["target_err"] > 30:
+                    cause = "bad plate target"
+                elif r["tcp_plate_dxy"] > 35:
+                    cause = "released off the plate (target ok)"
+                elif not r["cube_in_hand"]:
+                    cause = "cube not in hand at release"
+                else:
+                    cause = "released over the plate"
+                outcome["place_cause"] = cause
+                if r:
+                    close_txt += (f" | release: tcp-plate dxy={r['tcp_plate_dxy']:.0f}mm dz={r['tcp_plate_dz']:.0f}mm "
+                                  f"target err={r['target_err'] if r['target_err'] is None else round(r['target_err'])}mm "
+                                  f"in hand={r['cube_in_hand']} near={r['near']}")
+                if outcome.get("place_init_err") is not None:
+                    upd = [e for e in ep_track["place"] if e[0] == "sam2_update"]
+                    close_txt += (f" | plate target at start {outcome['place_init_err']:.0f}mm, max during tracking "
+                                  f"{max([e[1] for e in upd], default=0):.0f}mm ({len(upd)} updates)")
+                close_txt += f" | PLACE FAIL: {cause}"
+            if not outcome["pick"] and outcome.get("pick_target_start_err") is not None:
+                fs = [e[1] for e in ep_track["pick"] if e[0] == "find_start"]
+                bg = [e for e in ep_track["pick"] if e[0] == "sam2_update"]
+                bgm = max([e[1] for e in ep_track["pick"] if e[0] == "bg"], default=0)
+                close_txt += (f" | cube target: at find {fs[-1] if fs else float('nan'):.0f}mm, max during plate find/home "
+                              f"{bgm:.0f}mm, at pick start "
+                              f"{outcome['pick_target_start_err']:.0f}mm")
+            if outcome.get("pick_start"):
+                close_txt += (f" | pick start: target yaw err {outcome['pick_start']['yaw_err']:.0f}deg, gripper opening "
+                              f"{outcome['pick_start']['opening']:.2f}")
+            if outcome.get("close_yaw") is not None:
+                close_txt += f" | jaw-cube yaw at close {outcome['close_yaw']:.0f}deg"
+            if not outcome["pick"] and outcome.get("pick_verdict_at"):
+                t_, d_, o_ = outcome["pick_verdict_at"]
+                close_txt += f" | pick verdict at step {t_}: tcp-cube {d_:.0f}mm, gripper opening {o_:.2f}"
+            if outcome.get("find_failed"):
+                close_txt += f" | FIND FAILED: {outcome['find_failed']}"
+            retries = [outcome.get(f"find_{sk}_attempts", 1) - 1 for sk in ("pick", "place")]
+            if any(retries):
+                close_txt += f" | find retries cube={retries[0]} plate={retries[1]}"
+            if outcome.get("place_geom"):
+                close_txt += " | cube-plate dxy={:.0f}mm dz={:.0f}mm opening={:.2f}".format(*outcome["place_geom"])
+            print(f"[eval] {ep:3d} '{outcome['goal']}': pick={'ok' if outcome['pick'] else 'FAIL'} "
+                  f"place={'ok' if outcome['place'] else 'FAIL'} | {close_txt}", flush=True)
+            if ep in VIDEO_EPS and frames_out:
+                os.makedirs(os.path.dirname(args.video_out), exist_ok=True)
+                path = args.video_out if ep == args.video_episode else args.video_out.replace(".mp4", f"_ep{ep}.mp4")
+                imageio.mimsave(path, frames_out, fps=round(1 / env.step_dt))
+        if stop_all:
+            break
+        if args.compose != "none":
+            compose_report(ep, instruction, plan_info, subtasks)
         frames_out.clear()
 
+    if compose_results:
+        nc = len(compose_results)
+        print(f"[eval] compose {args.compose} ({args.planner}): success {sum(r['success'] for r in compose_results)}/{nc}; "
+              f"sub-tasks on target {sum(r['done'] for r in compose_results)}/{sum(r['n'] for r in compose_results)}; "
+              f"plans correct {sum(r['plan_ok'] for r in compose_results)}/{nc}, invalid "
+              f"{sum(not r['valid'] for r in compose_results)}")
     n = len(results)
     pick = sum(r["pick"] for r in results)
     full = sum(r["place"] for r in results)
