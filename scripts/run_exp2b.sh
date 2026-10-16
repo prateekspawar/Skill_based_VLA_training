@@ -27,9 +27,10 @@ if [[ ! -f $L/s512_replay_stack300/meta/info.json ]]; then
   $PY -m so101_lang.data.pointmap_merge attach $L/_replay_nopm $L/s512_replay_stack300 $L/s512_mono9rc2_r290 \
     $L/s512_stack9_300 >> $O/replay.log 2>&1 || { log "attach failed"; exit 1; }
   cp $L/s512_stack9_300/meta/stereo_calibration.json $L/s512_replay_stack300/meta/
+  $PY -m so101_lang.data.restore_nan $L/s512_replay_stack300 >> $O/replay.log 2>&1  # merge turns NaN into null
   log "replay dataset: $($PY -c "import json; i=json.load(open('$L/s512_replay_stack300/meta/info.json')); print(i['total_episodes'], 'episodes', i['total_frames'], 'frames')")"
 fi
-until grep -qE "^\[exp4\] [0-9:]+ done" logs/exp4.log 2>/dev/null; do sleep 120; done
+until grep -qE "^\[exp4\] [0-9:]+ done" logs/exp4.log 2>/dev/null; do sleep 120; done  # GPU
 name=mono9rc2_ft_replay_$STEPS
 if [[ ! -d checkpoints/$name/checkpoints/last/pretrained_model ]]; then
   log "training $name"

@@ -187,7 +187,6 @@ with sim_app.launch(env_cfg, args):
         rest = PLATE_TOP_Z + CUBE_SIZE / 2
         return float(torch.linalg.norm(c[:2] - pl[:2])) < PLATE_RADIUS - 0.01 and rest - 0.008 < float(c[2]) < rest + 0.012
 
-    DEFAULT_STACK = MODE["stack"]
     compose_results = []
 
     def llm_plan(instruction, objects):
@@ -304,6 +303,7 @@ with sim_app.launch(env_cfg, args):
     # Stacking (SO101_TASK_MODE=stack): the second object is the base cube `plate` and the second skill "stack".
     # Internally it keeps the "place" slot (targets, tracking, verdicts, outcome["place"] = final success).
     MODE = {"stack": os.environ.get("SO101_TASK_MODE", "place") == "stack"}  # per sub-task in composed tasks
+    DEFAULT_STACK = MODE["stack"]
 
     def second_query(plate):
         return language.cube_ref(plate) if MODE["stack"] else language.plate_ref(plate, plate_colors())
@@ -841,7 +841,7 @@ with sim_app.launch(env_cfg, args):
                             tgt_b = hb[:3, :3] @ torch.as_tensor(np.asarray(target)[:3], device=env.device, dtype=hb.dtype) + hb[:3, 3]
                             d = tcp_b_ - tgt_b
                             gate = args.stack_release_gate if MODE["stack"] and args.stack_release_gate else args.release_gate
-                        if float(torch.linalg.norm(d[:2])) > gate[0] or float(d[2]) > gate[1]:
+                            if float(torch.linalg.norm(d[:2])) > gate[0] or float(d[2]) > gate[1]:
                                 a = a.clone()
                                 a[9] = 0.0
                                 outcome["release_gated"] = outcome.get("release_gated", 0) + 1
