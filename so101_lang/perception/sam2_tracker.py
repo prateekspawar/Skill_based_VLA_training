@@ -276,7 +276,17 @@ class Sam2MultiTracker:
         self._model_owner: Sam2PointTracker | None = None
 
     def reset(self):
+        """Drop all trackers and their SAM2 video sessions (the per-frame state otherwise accumulates on the GPU:
+        composed tasks start many trackers per episode and ran the server out of memory)."""
+        for t in self.trackers.values():
+            t.session = None
+        if self._model_owner is not None:
+            self._model_owner.session = None
         self.trackers = {}
+        import gc
+
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def published(self) -> dict:
         out = {}

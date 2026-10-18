@@ -635,7 +635,7 @@ with sim_app.launch(env_cfg, args):
         # One hold step so the cameras show the new layout (first post-reset render is stale).
         env.step(adapter.ik_command(state_now(head_b), head_b))
         subtasks, instruction, plan_info = make_subtasks(ep, head_b)
-        stop_all = False
+        stop_all, ep_home = False, None
         for sub_i, (sub_cube, sub_target, sub_stack) in enumerate(subtasks):
             MODE["stack"] = env.pp_stack = sub_stack
             env.pp_task[0, 0], env.pp_task[0, 1] = sub_cube, sub_target
@@ -664,9 +664,13 @@ with sim_app.launch(env_cfg, args):
             rot6d = {}
             find_failed = False
             if args.pipeline == "find":
-                home_link = math_utils.subtract_frame_transforms(
-                    robot.data.root_pos_w.torch, robot.data.root_quat_w.torch,
-                    robot.data.body_pos_w.torch[:, gi], robot.data.body_quat_w.torch[:, gi])
+                if ep_home is None:  # the arm's start pose; later sub-tasks start from there again
+                    ep_home = math_utils.subtract_frame_transforms(
+                        robot.data.root_pos_w.torch, robot.data.root_quat_w.torch,
+                        robot.data.body_pos_w.torch[:, gi], robot.data.body_quat_w.torch[:, gi])
+                else:
+                    go_home(ep_home, head_b)
+                home_link = ep_home
                 tracked.clear()
                 bg_ctx.update(cube=cube, plate=plate)
                 if args.target == "sam2":
