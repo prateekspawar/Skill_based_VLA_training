@@ -43,6 +43,14 @@ any model change. \todo{one sentence on composed multi-step tasks (Exp.~3).}
 %======================================================================
 \section{Introduction}
 %======================================================================
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_scene.pdf}
+\caption{A successful evaluation episode seen from the left head camera: ``put the blue cube on the orange plate''.
+(a) Initial scene with randomly coloured plates; (b) \texttt{find} looks from a preset viewpoint; (c) \texttt{pick}
+grasps the tracked cube; (d) \texttt{place} releases it on the plate.}
+\label{fig:scene}
+\end{figure*}
 Generalist VLA policies such as OpenVLA~\cite{kim2024openvla}, $\pi_0$~\cite{black2024pi0} and
 SmolVLA~\cite{shukor2025smolvla} map images and an instruction to robot actions. Adapting them to new tasks
 without degrading old ones is an open problem: fine-tuning one model on new data causes interference and
@@ -57,6 +65,8 @@ instruction; a skill expert sees the corresponding segment of every demonstratio
 involved---provided it is told \emph{which} object to act on. We provide that information explicitly as a target
 pose from an open-vocabulary detection, stereo and tracking stack, building on evidence that grounded 3-D targets
 strongly improve VLA generalisation~\cite{stone2023moo,tsai2026headinjection}.
+
+Figure~\ref{fig:organisation} contrasts the three organisations we compare.
 
 \paragraph{Contributions.}
 \begin{itemize}
@@ -104,8 +114,18 @@ a simple proprioceptive grasp check (\S\ref{sec:reliability}).
 %======================================================================
 \section{System}\label{sec:system}
 %======================================================================
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_architecture.pdf}
+\caption{System overview. An instruction becomes a sequence of skill calls. Perception turns the stereo images into a
+tracked 9-D target pose for the active skill. Each skill is an expert (101\,M trainable parameters) on one frozen,
+shared vision-language backbone; only the active expert's weights are swapped. The executor ends skills on the
+expert's verdict, checks the grasp from the gripper opening (retrying a missed pick) and gates the release; a
+robot adapter and IK map head-frame TCP commands to the arm.}
+\label{fig:architecture}
+\end{figure*}
 \paragraph{Overview.}
-An instruction (``put the red cube on the green plate'') is mapped to a sequence of skill calls:
+Figure~\ref{fig:architecture} shows the system. An instruction (``put the red cube on the green plate'') is mapped to a sequence of skill calls:
 \texttt{find(cube)}, \texttt{find(plate)}, \texttt{pick(cube)}, \texttt{place(plate)}. Each skill is executed by a
 VLA expert that receives the left and right images of a stereo head camera, a point map from stereo depth, the
 step text, and a 19-D state: the tool-centre-point (TCP) pose (position, 6-D rotation, gripper opening) and the
@@ -139,6 +159,15 @@ sideways or 6.5\,cm above the perceived target.
 %======================================================================
 \section{Experimental Setup}\label{sec:setup}
 %======================================================================
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_organisation.pdf}
+\caption{Three organisations of the same capacity, data and compute. (a) One model for all instructions and skills.
+(b) One expert per instruction, selected by a router, each trained only on its instruction's episodes (CORAL-style
+granularity). (c) One expert per skill, composed by a planner and told its target by perception; each expert trains on
+that skill's segment of every episode.}
+\label{fig:organisation}
+\end{figure*}
 \paragraph{Environment.}
 A simulated SO-101 arm (5-DoF + gripper) in Isaac Lab~\cite{mittal2023orbit} with four 3\,cm cubes and two plates
 whose colours are drawn per episode from nine colours (including the cube colours). The stereo head
@@ -219,11 +248,21 @@ Push full & 81\% & 87\% & \pv{0.12} \\
 {\footnotesize $^\dagger$2 further picks were confirmed only in the final check (logging fixed later): 82\%.}
 \end{table}
 
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_results.pdf}
+\caption{(a) Experiment~4: full success of task-level and skill-level experts on four seen and two unseen
+instructions (50 paired episodes each; all differences $p\le0.02$). (b) Experiment~2: stacking success when the
+\texttt{stack} skill is added in different ways (150 paired episodes); for the monolith, the success on its original
+pick-and-place task afterwards is given.}
+\label{fig:results}
+\end{figure*}
+
 \subsection{Experiment 4: task-level vs.\ skill-level experts}\label{sec:exp4}
 We train four task experts, each a complete pick-and-place model on the 110--121 episodes of one instruction, for
 7.5k steps each (30k total, as in Exp.~1), and evaluate each on 50 episodes of its own instruction alongside the
 skill experts (same scenes). For two unseen instructions we route to the expert with the same cube colour
-(Table~\ref{tab:exp4}). Skill experts reach 90--98\% on seen and 94\% on unseen instructions; task experts reach
+(Table~\ref{tab:exp4}, Fig.~\ref{fig:results}a). Skill experts reach 90--98\% on seen and 94\% on unseen instructions; task experts reach
 56--72\% even on their own instruction and 48--58\% on unseen ones (all $p\le0.02$). Task experts do not collapse on
 unseen instructions, which we attribute to the grounded target pose. \textbf{Organising experts by skill lets each
 expert use all the data; organising by task partitions it.}
@@ -250,7 +289,7 @@ instruction; for unseen instructions, the expert with the same cube colour is us
 
 \subsection{Experiment 2: adding a new skill}\label{sec:exp2}
 We add \texttt{stack} (place a cube on another cube), a geometrically different target, from 300 new
-demonstrations (Table~\ref{tab:exp2}). A new stack expert, trained in isolation, stacks 53\% (33\% with 100
+demonstrations (Table~\ref{tab:exp2}, Fig.~\ref{fig:results}b). A new stack expert, trained in isolation, stacks 53\% (33\% with 100
 demonstrations, $p<10^{-4}$), and 59\% when initialised from the place expert. The existing place expert used
 for stacking without training fails entirely: it lowers the cube as onto a plate and knocks it out of the
 gripper. Fine-tuning the monolith on the stack data alone erases its previous skills (0\% on stacking and on its
