@@ -178,7 +178,7 @@ def fig_results():
     a.set_ylabel("full success (%)", fontsize=6.6)
     a.grid(axis="y", color=RULE, lw=0.5, zorder=0)
     a.legend(frameon=False, fontsize=6.2, loc="lower left", ncol=2, bbox_to_anchor=(0, -0.36))
-    a.set_title("(a) Exp. 4: task-level vs skill-level experts (50 episodes each)", fontsize=7.2, color=INK, loc="left")
+    a.set_title("(a) Exp. 2: task-level vs skill-level experts (50 episodes each)", fontsize=7.2, color=INK, loc="left")
     # (b) experiment 2: adding stack
     meth = ["place expert reused", "stack expert, 100 demos", "stack expert, 300 demos", "stack expert, from place",
             "monolith, stack only", "monolith + replay"]
@@ -193,7 +193,7 @@ def fig_results():
     b.set_xlim(0, 105), b.set_xticks([0, 25, 50, 75, 100])
     b.set_xlabel("stacked (%)", fontsize=6.6)
     b.grid(axis="x", color=RULE, lw=0.5, zorder=0)
-    b.set_title("(b) Exp. 2: adding the stack skill (150 episodes)", fontsize=7.2, color=INK, loc="left")
+    b.set_title("(b) Exp. 3: adding the stack skill (150 episodes)", fontsize=7.2, color=INK, loc="left")
     for ax in (a, b):
         for s in ("top", "right"):
             ax.spines[s].set_visible(False)
@@ -216,7 +216,7 @@ def fig_composed():
     a.set_xticks(list(xs), tasks, fontsize=6.0)
     a.set_ylim(0, 105), a.set_yticks([0, 25, 50, 75, 100])
     a.set_ylabel("composed success (%)", fontsize=6.6)
-    a.set_title("(a) Exp. 3: unseen composed tasks (50 episodes)", fontsize=7.2, color=INK, loc="left")
+    a.set_title("(a) Exp. 4: unseen composed tasks (50 episodes)", fontsize=7.2, color=INK, loc="left")
     a.legend(frameon=False, fontsize=6.0, loc="upper right")
     # (b) per step: first sub-task, and second given the first succeeded
     steps = ["1st cube\n\u2192 plate", "2nd cube\n\u2192 plate", "cube\n\u2192 plate", "stack on\nplated cube",

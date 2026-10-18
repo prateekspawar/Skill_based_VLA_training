@@ -15,7 +15,7 @@
 \newcommand{\pv}[1]{$p{=}#1$}
 
 \title{Skill-Level Experts with Grounded Targets:\\
-Modularity, Generality and Reliability in\\Language-Conditioned Manipulation}
+Modularity and Generality in\\Language-Conditioned Manipulation}
 \author{\IEEEauthorblockN{Prateek Pawar}
 \IEEEauthorblockA{Independent researcher\\
 prateekspawar@gmail.com}}
@@ -28,18 +28,16 @@ Vision-language-action (VLA) models are increasingly specialised by attaching sm
 shared, frozen backbone. We ask at which granularity such experts should be defined. We compare three ways of
 organising the same model capacity, data and compute for language-conditioned pick-and-place on a 5-DoF arm in
 simulation: one monolithic model, \emph{task-level} experts (one per instruction, as in recent LoRA-expert
-systems), and \emph{skill-level} experts (one per primitive---find, pick, place, stack---composed into tasks),
-all conditioned on a target pose provided by an open-vocabulary perception and tracking stack. In seeded, paired
-evaluations of 50--150 episodes per condition we find that (i) splitting by skill does not improve per-skill
+systems), and \emph{skill-level} experts (one per primitive such as find, pick, place and stack, composed into
+tasks), all conditioned on a target pose provided by an open-vocabulary perception and tracking stack. In seeded,
+paired evaluations of 50-150 episodes per condition we find that (i) splitting by skill does not improve per-skill
 accuracy over a monolithic model trained on the same data; (ii) skill-level experts generalise far better than
-task-level experts, on seen (90--98\% vs.\ 56--72\% success) and unseen instructions (94\% vs.\ 48--58\%), because
+task-level experts, on seen (90-98\% vs.\ 56-72\% success) and unseen instructions (94\% vs.\ 48-58\%), because
 every skill learns from all episodes; (iii) a new skill can be added in isolation without any access to old data
 or risk to deployed skills, while naive fine-tuning of a monolithic model erases its previous skills (0\%), and
-fine-tuning with replay retains them but requires the old data and full re-validation. We further report a
-failure-driven reliability study in which executor-level mechanisms---a proprioceptive grasp check with retry and
-a release gate---raise end-to-end success from 45\% to 91\% (and from 22\% to 87\% under object pushes), more than
-any model change. On unseen multi-step tasks, skills compose almost independently for both organisations, and
-composite success is bounded by the weakest skill, here stacking onto raised targets.
+fine-tuning with replay retains them but requires the old data and full re-validation; (iv) on unseen multi-step
+tasks, skills compose almost independently for both organisations, and composite success is bounded by the
+weakest skill, here stacking onto raised targets.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -68,7 +66,7 @@ an expert be responsible for?} Experts can be defined per task (``put the blue c
 skill (``pick'', ``place''), with a planner composing skills into tasks~\cite{ahn2022saycan,liang2023cap}. The
 two choices partition the same data very differently. A task expert sees only the demonstrations of its
 instruction; a skill expert sees the corresponding segment of every demonstration, regardless of which objects are
-involved---provided it is told \emph{which} object to act on. We provide that information explicitly as a target
+involved, provided it is told \emph{which} object to act on. We provide that information explicitly as a target
 pose from an open-vocabulary detection, stereo and tracking stack, building on evidence that grounded 3-D targets
 strongly improve VLA generalisation~\cite{stone2023moo,tsai2026headinjection}.
 
@@ -79,12 +77,10 @@ Figure~\ref{fig:organisation} contrasts the three organisations we compare.
 \item A modular architecture of skill-level experts on a shared frozen VLA backbone, each conditioned on a tracked
   9-D target pose and emitting a pass/fail verdict, with a robot-agnostic action space (\S\ref{sec:system}).
 \item A controlled comparison of monolithic, task-level and skill-level organisations at equal data and compute
-  (\S\ref{sec:exp1}, \S\ref{sec:exp4}), of how each absorbs a new skill (\S\ref{sec:exp2}), and of how each executes
-  unseen multi-step compositions (\S\ref{sec:exp3}).
-\item A failure-driven reliability study showing that executor-level mechanisms and data labelling dominate
-  end-to-end success (\S\ref{sec:reliability}).
-\item An evaluation protocol with seeded, paired episodes and per-cause failure accounting, which exposed several
-  evaluation and labelling artefacts that would otherwise have been attributed to the models.
+  (\S\ref{sec:exp1}, \S\ref{sec:exp3}), of how each absorbs a new skill (\S\ref{sec:exp4}), and of how each executes
+  unseen multi-step compositions (\S\ref{sec:exp2}).
+\item An evaluation protocol with seeded, paired episodes and sign tests on the discordant pairs, so that
+  conditions are compared on identical scenes.
 \end{itemize}
 
 %======================================================================
@@ -115,8 +111,8 @@ SayCan~\cite{ahn2022saycan} and Code as Policies~\cite{liang2023cap} compose pre
 model. We compose learned skill experts; the LLM planner is left out of the experiments reported here.
 
 \paragraph{Failure detection.}
-SAFE~\cite{gu2025safe} predicts failure from VLA features. Our experts emit a learned verdict, and we compare it to
-a simple proprioceptive grasp check (\S\ref{sec:reliability}).
+SAFE~\cite{gu2025safe} predicts failure from VLA features. Our experts emit a learned verdict, and the executor
+additionally verifies each grasp from the gripper opening.
 
 %======================================================================
 \section{System}\label{sec:system}
@@ -149,16 +145,15 @@ action expert and depth branch (101\,M trainable parameters). Switching skills s
 \paragraph{Perception and target poses.}
 OWLv2~\cite{minderer2023owlv2} proposes candidate boxes; each candidate is scored by detector confidence for the
 request and for the noun, a stereo size likelihood, and a learned colour posterior of the object's own pixels
-(one CIELab Gaussian per colour name, fitted on rendered training images; the hand-crafted HSV rules it replaces
-scored a rendered brown plate at 0.00). Depth comes from a stereo network~\cite{wen2025foundationstereo}. The
-target's yaw is folded by the object's symmetry (90$^\circ$ for cubes): giving the policy the unfolded yaw it was
-trained on, but perception cannot measure, dropped pick success from 64\% to 18\%. \texttt{find} fuses detections
+(one CIELab Gaussian per colour name, fitted on rendered training images). Depth comes from a stereo
+network~\cite{wen2025foundationstereo}. The target's yaw is reported modulo the object's symmetry (90$^\circ$ for
+cubes), as perception measures it, and the training targets use the same convention. \texttt{find} fuses detections
 from the find view and three preset viewpoints; afterwards a SAM~2~\cite{ravi2024sam2} tracker per object, with a
 locked/following state machine on trusted measurements, publishes the target during execution.
 
 \paragraph{Executor.}
 A skill ends when the expert reports \textit{done} on two consecutive current-frame readings, or after 16\,s.
-After \texttt{pick}, a \emph{grasp check} reads the gripper opening: closed on nothing reads 0.00--0.01, holding a
+After \texttt{pick}, a \emph{grasp check} reads the gripper opening: closed on nothing reads 0.00-0.01, holding a
 cube $\approx$0.10. On a miss the executor opens, returns home, re-detects the cube and retries (up to twice).
 During \texttt{place}, a \emph{release gate} suppresses any opening command while the TCP is more than 4\,cm
 sideways or 6.5\,cm above the perceived target.
@@ -179,14 +174,14 @@ that skill's segment of every episode.}
 A simulated SO-101 arm (5-DoF + gripper) in Isaac Lab~\cite{mittal2023orbit} with four 3\,cm cubes and two plates
 whose colours are drawn per episode from nine colours (including the cube colours). The stereo head
 (2$\times$512$^2$, 6\,cm baseline) is mounted like a human head relative to the arm. Pushes: the target cube is
-slid 3--6\,cm during the pick approach.
+slid 3-6\,cm during the pick approach.
 
 \paragraph{Data.}
 A scripted expert with DART-style noise~\cite{laskey2017dart} generates 1000 static and 1000 moving-target
 pick-and-place demonstrations, 500 in which the cube moves during the descent, and 400 failure demonstrations
 (grasp miss or slip, off-plate release, drop) whose motion before the failure is masked from the loss so that
 only the verdict is learnt there; in total 2{,}900 episodes (563k frames). Recording continues through the release
-so that the success label covers frames with the gripper open (\S\ref{sec:reliability}). Training targets imitate
+so that the success label covers frames with the gripper open. Training targets imitate
 the tracker: detection noise, update rate, dead-band and freezing near the gripper.
 
 \paragraph{Training.}
@@ -202,36 +197,6 @@ outcomes differ between identical runs (GPU non-determinism), so we treat differ
 %======================================================================
 \section{Results}
 %======================================================================
-
-\subsection{Reliability: where the failures were}\label{sec:reliability}
-Before comparing organisations, we brought the system to a reliable baseline by analysing every failure.
-Table~\ref{tab:reliability} lists the changes in order. The largest gains came from the executor and the data,
-not from the models: an 8\,s skill limit ended episodes whose pick verdict arrived late; demonstrations stopped
-when the cube first touched the plate, so the \textit{success} label covered frames with the gripper still closed
-and the place expert reported success before releasing; a learned success verdict passed many missed grasps
-(68\% accuracy under pushes), whereas the gripper opening separated them almost perfectly; and the place expert
-occasionally loosened its grip mid-carry. From the 9-Oct baseline to the final system, full success rose from
-45\% to 91\% (71 vs.\ 3 discordant episodes, $p<10^{-17}$) and under pushes from 22\% to 87\%.
-
-\begin{table}[t]
-\centering\small
-\caption{Reliability changes, cumulative (150 seeded episodes per row; full pick-and-place success).}
-\label{tab:reliability}
-\resizebox{\columnwidth}{!}{%
-\begin{tabular}{lcc}
-\toprule
-Change & Stationary & Push \\
-\midrule
-Baseline (fused find, 8\,s skills) & 45\% & 22\% \\
-Skill time limit 16\,s & 57\% & -- \\
-+ open gripper after place verdict & 64\% & -- \\
-+ learned colour posterior (all three) & 72\% & 33\% \\
-Retrain: post-release labels, late-push demos & 77\% & 29\% \\
-+ grasp check and pick retry & 85\% & 80\% \\
-+ release gate (final) & \textbf{91\%} & \textbf{87\%} \\
-\bottomrule
-\end{tabular}}
-\end{table}
 
 \subsection{Experiment 1: one model or one expert per skill?}\label{sec:exp1}
 We train a single model on exactly the frames the pick and place experts saw (with the same per-segment
@@ -260,27 +225,27 @@ Push full & 81\% & 87\% & \pv{0.12} \\
 \begin{figure*}[t]
 \centering
 \includegraphics[width=\textwidth]{figures/fig_results.pdf}
-\caption{(a) Experiment~4: full success of task-level and skill-level experts on four seen and two unseen
-instructions (50 paired episodes each; all differences $p\le0.02$). (b) Experiment~2: stacking success when the
+\caption{(a) Experiment~2: full success of task-level and skill-level experts on four seen and two unseen
+instructions (50 paired episodes each; all differences $p\le0.02$). (b) Experiment~3: stacking success when the
 \texttt{stack} skill is added in different ways (150 paired episodes); for the monolith, the success on its original
 pick-and-place task afterwards is given.}
 \label{fig:results}
 \end{figure*}
 
-\subsection{Experiment 4: task-level vs.\ skill-level experts}\label{sec:exp4}
-We train four task experts, each a complete pick-and-place model on the 110--121 episodes of one instruction, for
+\subsection{Experiment 2: task-level vs.\ skill-level experts}\label{sec:exp2}
+We train four task experts, each a complete pick-and-place model on the 110-121 episodes of one instruction, for
 7.5k steps each (30k total, as in Exp.~1), and evaluate each on 50 episodes of its own instruction alongside the
 skill experts (same scenes). For two unseen instructions we route to the expert with the same cube colour
-(Table~\ref{tab:exp4}, Fig.~\ref{fig:results}a). Skill experts reach 90--98\% on seen and 94\% on unseen instructions; task experts reach
-56--72\% even on their own instruction and 48--58\% on unseen ones (all $p\le0.02$). Task experts do not collapse on
+(Table~\ref{tab:exp2}, Fig.~\ref{fig:results}a). Skill experts reach 90-98\% on seen and 94\% on unseen instructions; task experts reach
+56-72\% even on their own instruction and 48-58\% on unseen ones (all $p\le0.02$). Task experts do not collapse on
 unseen instructions, which we attribute to the grounded target pose. \textbf{Organising experts by skill lets each
 expert use all the data; organising by task partitions it.}
 
 \begin{table}[t]
 \centering\small
-\caption{Experiment 4: full success, 50 paired episodes per instruction. Task experts are trained only on their
+\caption{Experiment 2: full success, 50 paired episodes per instruction. Task experts are trained only on their
 instruction; for unseen instructions, the expert with the same cube colour is used.}
-\label{tab:exp4}
+\label{tab:exp2}
 \resizebox{\columnwidth}{!}{%
 \begin{tabular}{llccc}
 \toprule
@@ -297,9 +262,9 @@ instruction; for unseen instructions, the expert with the same cube colour is us
 \end{tabular}}
 \end{table}
 
-\subsection{Experiment 2: adding a new skill}\label{sec:exp2}
+\subsection{Experiment 3: adding a new skill}\label{sec:exp3}
 We add \texttt{stack} (place a cube on another cube), a geometrically different target, from 300 new
-demonstrations (Table~\ref{tab:exp2}, Fig.~\ref{fig:results}b). A new stack expert, trained in isolation, stacks 53\% (33\% with 100
+demonstrations (Table~\ref{tab:exp3}, Fig.~\ref{fig:results}b). A new stack expert, trained in isolation, stacks 53\% (33\% with 100
 demonstrations, $p<10^{-4}$), and 59\% when initialised from the place expert. The existing place expert used
 for stacking without training fails entirely: it lowers the cube as onto a plate and knocks it out of the
 gripper. Fine-tuning the monolith on the stack data alone erases its previous skills (0\% on stacking and on its
@@ -310,8 +275,8 @@ transfers more but must be retrained with the old data and re-validated on every
 
 \begin{table}[t]
 \centering\small
-\caption{Experiment 2: adding \texttt{stack} (150 paired episodes; 5k training steps where trained).}
-\label{tab:exp2}
+\caption{Experiment 3: adding \texttt{stack} (150 paired episodes; 5k training steps where trained).}
+\label{tab:exp3}
 \resizebox{\columnwidth}{!}{%
 \begin{tabular}{lcc}
 \toprule
@@ -327,7 +292,7 @@ Monolith, fine-tuned with replay & \textbf{68\%} & 92\% \\
 \end{tabular}}
 \end{table}
 
-\subsection{Experiment 3: composed multi-step tasks}\label{sec:exp3}
+\subsection{Experiment 4: composed multi-step tasks}\label{sec:exp4}
 We evaluate three compositions that never occur as training episodes, each with 50 seeded episodes and the oracle
 skill sequence, so that only execution is compared: \emph{two plates} (two cubes onto the two plates),
 \emph{plate-stack} (a cube onto a plate, then a second cube stacked on it) and \emph{tower} (a three-cube tower).
@@ -338,7 +303,7 @@ on target in the final scene.
 \begin{figure*}[t]
 \centering
 \includegraphics[width=\textwidth]{figures/fig_composed.pdf}
-\caption{Experiment~3. (a) Composed success on three unseen multi-step tasks (50 paired episodes each). (b) Success
+\caption{Experiment~4. (a) Composed success on three unseen multi-step tasks (50 paired episodes each). (b) Success
 of each step: the first sub-task, and the second given that the first succeeded. Pick-and-place steps compose
 almost independently; stacking onto raised targets (a cube on a plate, a two-cube tower) is the bottleneck.}
 \label{fig:composed}
@@ -346,8 +311,8 @@ almost independently; stacking onto raised targets (a cube on a plate, a two-cub
 
 \begin{table}[t]
 \centering\small
-\caption{Experiment 3: composed success (50 paired episodes) and step success (second step given the first).}
-\label{tab:exp3}
+\caption{Experiment 4: composed success (50 paired episodes) and step success (second step given the first).}
+\label{tab:exp4}
 \resizebox{\columnwidth}{!}{%
 \begin{tabular}{lccc}
 \toprule
@@ -365,14 +330,14 @@ stack on a two-cube tower & 26\% & 26\% & \\
 \end{tabular}}
 \end{table}
 
-Table~\ref{tab:exp3} and Fig.~\ref{fig:composed} show three effects. First, pick-and-place steps compose almost
-independently: with 94\% on the first step and 91--94\% on the second, both approaches complete 86--88\% of the
+Table~\ref{tab:exp4} and Fig.~\ref{fig:composed} show three effects. First, pick-and-place steps compose almost
+independently: with 94\% on the first step and 91-94\% on the second, both approaches complete 86-88\% of the
 two-plate tasks, close to the product of the step rates. In no episode did a later step disturb an earlier
 completed one. Second, the composite rate is limited by the weakest skill: on plate-stack the first step succeeds
-in 94--96\% of episodes for both, and the gap (42\% vs.\ 62\%, $p=0.08$) comes entirely from the stacking step, in
-line with Exp.~2. Third, stacking onto raised targets degrades for both approaches: stacking on a cube that rests
+in 94-96\% of episodes for both, and the gap (42\% vs.\ 62\%, $p=0.08$) comes entirely from the stacking step, in
+line with Exp.~3. Third, stacking onto raised targets degrades for both approaches: stacking on a cube that rests
 on a plate drops to 45\%/65\%, and stacking on a two-cube tower to 26\% for both, against 59\%/68\% on the table
-(Exp.~2). Those target heights never occur in the stacking demonstrations, so neither organisation extrapolates in
+(Exp.~3). Those target heights never occur in the stacking demonstrations, so neither organisation extrapolates in
 height. \textbf{Composition itself works for both organisations; composite success is bounded by the individual
 skills, and both fail to extrapolate a skill to target geometry outside its demonstrations.}
 
@@ -381,20 +346,15 @@ skills, and both fail to extrapolate a skill to target geometry outside its demo
 %======================================================================
 \paragraph{What modularity buys.}
 In our setting skill-level experts do not improve the accuracy of individual skills (Exp.~1), but they generalise
-across objects and instructions far better than task-level experts at equal compute (Exp.~4), and they allow new
-skills to be added safely (Exp.~2). Their cost is reduced transfer between skills: a monolith trained with replay
+across objects and instructions far better than task-level experts at equal compute (Exp.~2), and they allow new
+skills to be added safely (Exp.~3). Their cost is reduced transfer between skills: a monolith trained with replay
 stacks better than an isolated stack expert, and warm-starting the new expert from a related one recovers part
-of the gap. The same difference carries over to composed tasks (Exp.~3), where composite success follows the weakest
+of the gap. The same difference carries over to composed tasks (Exp.~4), where composite success follows the weakest
 skill.
 
 \paragraph{The role of grounding.}
 The target pose is what makes a single pick expert serve every object, and it also keeps task experts from failing
 completely on unseen instructions. It does not transfer across target \emph{geometry}: a place expert cannot stack.
-
-\paragraph{Reliability.}
-The largest end-to-end gains came from executor mechanisms and labelling, and several apparent model failures
-were evaluation or labelling artefacts (a simulator time-out that silently reset long episodes; a success label
-placed before the release). We encourage reporting per-cause failure accounting alongside success rates.
 
 \paragraph{Limitations.}
 All results are in simulation, with one arm and one family of objects (cubes and plates). Our task-level condition
@@ -407,9 +367,14 @@ real hardware; both are the next steps.
 %======================================================================
 We studied at which granularity to define experts on a shared VLA backbone. Defining them per skill and grounding
 each skill in a tracked target pose gave much better generalisation than per-task experts, no loss against a
-monolithic model, and safe extension with new skills; executor-level mechanisms were as important as the models
-for end-to-end reliability. Composed tasks succeed when their skills do: composition itself added no failures,
+monolithic model, and safe extension with new skills. Composed tasks succeed when their skills do: composition itself added no failures,
 which makes the remaining gap a matter of individual skills and their training distribution.
+
+\section*{Acknowledgment}
+Claude (Anthropic), used through Claude Code, assisted throughout this work: implementing the simulation, data,
+training and evaluation code, running and analysing the experiments, and drafting the text and figures under the
+author's direction. The author designed the study, reviewed all results and takes full responsibility for the
+content of this paper.
 
 \bibliographystyle{IEEEtran}
 \bibliography{references}

@@ -451,15 +451,19 @@ Monolithic vs task-level vs skill-level experts at equal data and compute. Paper
 results and paired sign tests in `paper/data/` (`summary.csv`). Drivers: `scripts/run_exp1_mono.sh`,
 `run_exp2_stack.sh`, `run_exp2b.sh`, `run_exp3_compose.sh`, `run_exp4_task_experts.sh`.
 
+Numbering follows the paper (order of presentation): 1 = monolith vs skills, 2 = task vs skill experts, 3 = adding
+a skill, 4 = composed tasks. (Driver scripts keep their original names: run_exp4_task_experts.sh = Exp. 2,
+run_exp2_stack.sh / run_exp2b.sh = Exp. 3, run_exp3_compose.sh = Exp. 4.)
+
 | Exp. | Comparison | Result |
 |---|---|---|
 | 1 | one model (`mono9rc2_30000`, 30k steps) vs pick + place experts (2 x 15k), same frames | stationary full 93 vs 91 % (p = 0.22); push 81 vs 87 % (p = 0.12); no consistent difference |
-| 4 | task experts (one per instruction, ~115 episodes, 4 x 7.5k steps) vs skill experts | seen 56-72 vs 90-98 %, unseen (nearest expert) 48-58 vs 94 %; all p <= 0.02 |
-| 2 | adding `stack` (300 demos, 5k steps) | stack expert 53 % (100 demos 33 %), from place 59 %; place expert reused 0 %; monolith FT on stack only 0 % and forgets pick+place (0 %); monolith + replay (290 old episodes) 68 %, keeps 92 %; stacking release gate: no gain |
-| 3 | unseen compositions, oracle sequences, skills vs monolith + replay | two plates 86 vs 88 %, plate-stack 42 vs 62 % (p = 0.08), tower 16 vs 18 %; 2nd step: 2nd plate 91/94 %, stack on a plated cube 45/65 %, stack on a 2-cube tower 26/26 % |
+| 2 | task experts (one per instruction, ~115 episodes, 4 x 7.5k steps) vs skill experts | seen 56-72 vs 90-98 %, unseen (nearest expert) 48-58 vs 94 %; all p <= 0.02 |
+| 3 | adding `stack` (300 demos, 5k steps) | stack expert 53 % (100 demos 33 %), from place 59 %; place expert reused 0 %; monolith FT on stack only 0 % and forgets pick+place (0 %); monolith + replay (290 old episodes) 68 %, keeps 92 %; stacking release gate: no gain |
+| 4 | unseen compositions, oracle sequences, skills vs monolith + replay | two plates 86 vs 88 %, plate-stack 42 vs 62 % (p = 0.08), tower 16 vs 18 %; 2nd step: 2nd plate 91/94 %, stack on a plated cube 45/65 %, stack on a 2-cube tower 26/26 % |
 
 - Splitting by skill does not improve individual skills (Exp. 1); its value is that every expert learns from all
-  the data (Exp. 4) and that skills are added in isolation (Exp. 2). The monolith with replay transfers more
+  the data (Exp. 2) and that skills are added in isolation (Exp. 3). The monolith with replay transfers more
   between skills (stacking) but needs the old data and re-validation on every change.
 - Steps compose almost independently; no later step disturbed an earlier one. Composite success follows the weakest
   skill: stacking, which also does not extrapolate to target heights absent from its demos (cube on a plate, tower).

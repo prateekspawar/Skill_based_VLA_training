@@ -28,7 +28,7 @@ RUNS = {  # experiment -> {run name: evaluation log}
         "skills_still": "outputs/eval_gate/still.log",
         "skills_push": "outputs/eval_gate/push.log",
     },
-    "exp2_add_skill": {
+    "exp3_add_skill": {
         "stack_skill_100": "outputs/exp2/stack_skill_100/still.log",
         "stack_skill_300": "outputs/exp2/stack_skill_300/still.log",
         "stack_skill_place300": "outputs/exp2/stack_skill_place300/still.log",
@@ -39,9 +39,9 @@ RUNS = {  # experiment -> {run name: evaluation log}
         "stack_mono_replay": "outputs/exp2/stack_mono_replay/still.log",
         "place_mono_replay": "outputs/exp2/place_mono_replay/still.log",
     },
-    "exp3_composed": {f"{c}_{a}": f"outputs/exp3/{c}_{a}/still.log"
+    "exp4_composed": {f"{c}_{a}": f"outputs/exp3/{c}_{a}/still.log"
                       for c in ("pairs", "plate_stack", "tower") for a in ("skills", "mono")},
-    "exp4_task_vs_skill": {f"{s}_{k}": f"outputs/exp4/{s}_{k}/still.log"
+    "exp2_task_vs_skill": {f"{s}_{k}": f"outputs/exp4/{s}_{k}/still.log"
                            for s in ("seen_task", "seen_skill") for k in ("bb", "ry", "bw", "rg")}
                           | {f"{s}_{k}": f"outputs/exp4/{s}_{k}/still.log"
                              for s in ("unseen_task", "unseen_skill") for k in ("bo", "rp")},
@@ -52,10 +52,10 @@ COMPARISONS = [  # (label, experiment, run A, run B)
     ("final vs baseline, push", "reliability", "final_push", "baseline_push"),
     ("monolith vs skills, stationary", "exp1_mono_vs_skills", "mono_still", "skills_still"),
     ("monolith vs skills, push", "exp1_mono_vs_skills", "mono_push", "skills_push"),
-    ("stack 300 vs 100 demos", "exp2_add_skill", "stack_skill_300", "stack_skill_100"),
-    ("stack from place vs from scratch", "exp2_add_skill", "stack_skill_place300", "stack_skill_300"),
-    ("monolith+replay vs stack from place", "exp2_add_skill", "stack_mono_replay", "stack_skill_place300"),
-] + [(f"task vs skill, {s} {k}", "exp4_task_vs_skill", f"{s}_task_{k}", f"{s}_skill_{k}")
+    ("stack 300 vs 100 demos", "exp3_add_skill", "stack_skill_300", "stack_skill_100"),
+    ("stack from place vs from scratch", "exp3_add_skill", "stack_skill_place300", "stack_skill_300"),
+    ("monolith+replay vs stack from place", "exp3_add_skill", "stack_mono_replay", "stack_skill_place300"),
+] + [(f"task vs skill, {s} {k}", "exp2_task_vs_skill", f"{s}_task_{k}", f"{s}_skill_{k}")
      for s, ks in (("seen", ("bb", "ry", "bw", "rg")), ("unseen", ("bo", "rp"))) for k in ks]
 
 KEEP = re.compile(r"^\[(eval|compose)\]")
@@ -105,17 +105,17 @@ for label, exp, a, b in COMPARISONS:
         l_ = sum(ok(B[e], key) and not ok(A[e], key) for e in keys)
         rows.append({"comparison": label, "metric": metric, "episodes": len(keys), "A": a, "A_success": ra,
                      "B": b, "B_success": rb, "A_better": w, "B_better": l_, "sign_test_p": f"{sign_test(w, l_):.3g}"})
-# Experiment 3: composed success from the [compose] lines (all sub-tasks on target in the final scene).
+# Experiment 4: composed success from the [compose] lines (all sub-tasks on target in the final scene).
 for c in ("pairs", "plate_stack", "tower"):
     a_, b_ = f"{c}_mono", f"{c}_skills"
-    if ("exp3_composed", a_) not in texts or ("exp3_composed", b_) not in texts:
+    if ("exp4_composed", a_) not in texts or ("exp4_composed", b_) not in texts:
         continue
 
     def comp(text):
         return {int(m.group(1)): m.group(2) == "SUCCESS"
                 for m in re.finditer(r"^\[compose\] +(\d+) .*?: (SUCCESS|FAIL)", text, re.M)}
 
-    A, B = comp(texts[("exp3_composed", a_)]), comp(texts[("exp3_composed", b_)])
+    A, B = comp(texts[("exp4_composed", a_)]), comp(texts[("exp4_composed", b_)])
     keys = sorted(set(A) & set(B))
     w = sum(A[e] and not B[e] for e in keys)
     l_ = sum(B[e] and not A[e] for e in keys)

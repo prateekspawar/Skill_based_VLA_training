@@ -23,9 +23,9 @@ expert per skill?** A paper draft is in [`paper/`](paper/).
 |---|---|
 | End-to-end pick-and-place (random plate colours, 150 episodes) | **91%** stationary, **87%** with the cube pushed mid-pick (from 45% / 22% after a failure-driven reliability study) |
 | One model vs one expert per skill, same data and compute (Exp. 1) | No consistent difference (93% vs 91% stationary, 81% vs 87% pushed) |
-| Expert per **task** vs per **skill**, same compute (Exp. 4) | Seen instructions **56–72% vs 90–98%**; unseen **48–58% vs 94%** (all p ≤ 0.02) |
-| Adding a new skill (`stack`, 300 demos) (Exp. 2) | New skill expert: 53% (59% initialised from `place`), old skills untouched. Monolith fine-tuned on stack data: 0%, forgets everything; with replay of old data: 68%, keeps 92% |
-| Unseen multi-step tasks (Exp. 3, 50 episodes each) | Two cubes onto two plates: 86% skills vs 88% monolith; plate then stack: 42% vs 62%; 3-cube tower: 16% vs 18%. Steps compose almost independently; stacking onto raised targets is the bottleneck for both |
+| Expert per **task** vs per **skill**, same compute (Exp. 2) | Seen instructions **56–72% vs 90–98%**; unseen **48–58% vs 94%** (all p ≤ 0.02) |
+| Adding a new skill (`stack`, 300 demos) (Exp. 3) | New skill expert: 53% (59% initialised from `place`), old skills untouched. Monolith fine-tuned on stack data: 0%, forgets everything; with replay of old data: 68%, keeps 92% |
+| Unseen multi-step tasks (Exp. 4, 50 episodes each) | Two cubes onto two plates: 86% skills vs 88% monolith; plate then stack: 42% vs 62%; 3-cube tower: 16% vs 18%. Steps compose almost independently; stacking onto raised targets is the bottleneck for both |
 
 Skill-level experts do not make individual skills better, but they let every expert learn from all the data and
 transfer to new objects and instructions, and they make adding skills safe. Composed tasks succeed when their
