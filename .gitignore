@@ -5,3 +5,11 @@ __pycache__/
 *.egg-info/
 models/
 logs/
+paper/*.aux
+paper/*.log
+paper/*.bbl
+paper/*.blg
+paper/*.fdb_latexmk
+paper/*.fls
+paper/*.out
+paper/*.synctex.gz

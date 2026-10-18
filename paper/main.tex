@@ -12,12 +12,12 @@
 \usepackage{siunitx}
 
 \newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
-\newcommand{\pv}[1]{\scriptsize{$p{=}#1$}}
+\newcommand{\pv}[1]{$p{=}#1$}
 
 \title{Skill-Level Experts with Grounded Targets:\\
 Modularity, Generality and Reliability in\\Language-Conditioned Manipulation}
-\author{\IEEEauthorblockN{\todo{Author name}}
-\IEEEauthorblockA{\todo{Affiliation}\\
+\author{\IEEEauthorblockN{Prateek Pawar}
+\IEEEauthorblockA{Independent researcher\\
 prateekspawar@gmail.com}}
 
 \begin{document}
@@ -190,7 +190,7 @@ so that the success label covers frames with the gripper open (\S\ref{sec:reliab
 the tracker: detection noise, update rate, dead-band and freezing near the gripper.
 
 \paragraph{Training.}
-All models are trained with the same recipe (batch 32, frozen backbone, cosine schedule) from the same base.
+All models are trained with LeRobot~\cite{cadene2024lerobot} using the same recipe (batch 32, frozen backbone, cosine schedule) from the same base.
 Skill experts: 15k steps each for pick and place; find: 15k steps on 1{,}200 find demonstrations.
 
 \paragraph{Protocol.}
@@ -217,6 +217,7 @@ occasionally loosened its grip mid-carry. From the 9-Oct baseline to the final s
 \centering\small
 \caption{Reliability changes, cumulative (150 seeded episodes per row; full pick-and-place success).}
 \label{tab:reliability}
+\resizebox{\columnwidth}{!}{%
 \begin{tabular}{lcc}
 \toprule
 Change & Stationary & Push \\
@@ -229,7 +230,7 @@ Retrain: post-release labels, late-push demos & 77\% & 29\% \\
 + grasp check and pick retry & 85\% & 80\% \\
 + release gate (final) & \textbf{91\%} & \textbf{87\%} \\
 \bottomrule
-\end{tabular}
+\end{tabular}}
 \end{table}
 
 \subsection{Experiment 1: one model or one expert per skill?}\label{sec:exp1}
@@ -242,6 +243,7 @@ the push pick difference reaches $p<0.05$. \textbf{Splitting by skill does not, 
 \centering\small
 \caption{Experiment 1: monolithic vs.\ per-skill experts, same data and compute (150 paired episodes).}
 \label{tab:exp1}
+\resizebox{\columnwidth}{!}{%
 \begin{tabular}{lccc}
 \toprule
 & Monolithic & Skill experts & sign test \\
@@ -251,7 +253,7 @@ Stationary full & 93\% & 91\% & \pv{0.22} \\
 Push pick & 81\%$^\dagger$ & 87\% & \pv{0.04} \\
 Push full & 81\% & 87\% & \pv{0.12} \\
 \bottomrule
-\end{tabular}\\[2pt]
+\end{tabular}}\\[2pt]
 {\footnotesize $^\dagger$2 further picks were confirmed only in the final check (logging fixed later): 82\%.}
 \end{table}
 
@@ -279,6 +281,7 @@ expert use all the data; organising by task partitions it.}
 \caption{Experiment 4: full success, 50 paired episodes per instruction. Task experts are trained only on their
 instruction; for unseen instructions, the expert with the same cube colour is used.}
 \label{tab:exp4}
+\resizebox{\columnwidth}{!}{%
 \begin{tabular}{llccc}
 \toprule
 & Instruction & Task exp. & Skill exp. & sign test \\
@@ -291,7 +294,7 @@ instruction; for unseen instructions, the expert with the same cube colour is us
 \multirow{2}{*}{unseen} & blue cube $\to$ orange plate & 48\% & 94\% & \pv{2\cdot10^{-6}} \\
 & red cube $\to$ purple plate & 58\% & 94\% & \pv{4\cdot10^{-5}} \\
 \bottomrule
-\end{tabular}
+\end{tabular}}
 \end{table}
 
 \subsection{Experiment 2: adding a new skill}\label{sec:exp2}
@@ -300,7 +303,7 @@ demonstrations (Table~\ref{tab:exp2}, Fig.~\ref{fig:results}b). A new stack expe
 demonstrations, $p<10^{-4}$), and 59\% when initialised from the place expert. The existing place expert used
 for stacking without training fails entirely: it lowers the cube as onto a plate and knocks it out of the
 gripper. Fine-tuning the monolith on the stack data alone erases its previous skills (0\% on stacking and on its
-original pick-and-place task); fine-tuning with replay of 290 old episodes reaches 68\% stacking and retains
+original pick-and-place task); fine-tuning with replay~\cite{rolnick2019replay} of 290 old episodes reaches 68\% stacking and retains
 pick-and-place at 92\% (vs.\ 93\%, $p=0.69$). Training compute is identical (5k steps); the difference is
 operational. \textbf{The skill expert is added without old data and cannot affect deployed skills; the monolith
 transfers more but must be retrained with the old data and re-validated on every change.}
@@ -309,6 +312,7 @@ transfers more but must be retrained with the old data and re-validated on every
 \centering\small
 \caption{Experiment 2: adding \texttt{stack} (150 paired episodes; 5k training steps where trained).}
 \label{tab:exp2}
+\resizebox{\columnwidth}{!}{%
 \begin{tabular}{lcc}
 \toprule
 Method & Stacked & Old pick+place \\
@@ -320,7 +324,7 @@ Stack expert, 300 demos, from place & 59\% & unchanged \\
 Monolith, fine-tuned on stack only & 0\% & 0\% \\
 Monolith, fine-tuned with replay & \textbf{68\%} & 92\% \\
 \bottomrule
-\end{tabular}
+\end{tabular}}
 \end{table}
 
 \subsection{Experiment 3: composed multi-step tasks}\label{sec:exp3}
@@ -344,9 +348,10 @@ almost independently; stacking onto raised targets (a cube on a plate, a two-cub
 \centering\small
 \caption{Experiment 3: composed success (50 paired episodes) and step success (second step given the first).}
 \label{tab:exp3}
+\resizebox{\columnwidth}{!}{%
 \begin{tabular}{lccc}
 \toprule
-Task & Skill experts & Monolith + replay & sign test \\
+Task & Skill experts & Monolith+replay & sign test \\
 \midrule
 two plates & 86\% & 88\% & \pv{1.0} \\
 plate-stack & 42\% & 62\% & \pv{0.08} \\
@@ -357,7 +362,7 @@ tower & 16\% & 18\% & \pv{1.0} \\
 stack on a cube on a plate & 45\% & 65\% & \\
 stack on a two-cube tower & 26\% & 26\% & \\
 \bottomrule
-\end{tabular}
+\end{tabular}}
 \end{table}
 
 Table~\ref{tab:exp3} and Fig.~\ref{fig:composed} show three effects. First, pick-and-place steps compose almost

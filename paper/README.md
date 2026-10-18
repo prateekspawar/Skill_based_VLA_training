@@ -4,7 +4,7 @@
 Experiment 3 and the author list are marked `\todo{...}` (red in the PDF); bibliography entries with
 `note = {VERIFY}` must be checked against the published versions.
 
-Build (TeX Live is not installed on this machine; Overleaf works with the two files as they are):
+Build (IEEEtran; needs texlive-latex-extra and texlive-publishers, or Overleaf). The compiled `main.pdf` is committed:
 
     latexmk -pdf main.tex      # or: pdflatex main && bibtex main && pdflatex main && pdflatex main
 
