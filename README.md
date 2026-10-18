@@ -25,15 +25,17 @@ expert per skill?** A paper draft is in [`paper/`](paper/).
 | One model vs one expert per skill, same data and compute (Exp. 1) | No consistent difference (93% vs 91% stationary, 81% vs 87% pushed) |
 | Expert per **task** vs per **skill**, same compute (Exp. 4) | Seen instructions **56–72% vs 90–98%**; unseen **48–58% vs 94%** (all p ≤ 0.02) |
 | Adding a new skill (`stack`, 300 demos) (Exp. 2) | New skill expert: 53% (59% initialised from `place`), old skills untouched. Monolith fine-tuned on stack data: 0%, forgets everything; with replay of old data: 68%, keeps 92% |
-| Unseen multi-step tasks (Exp. 3) | Two cubes onto two plates: 86% skills vs 88% monolith. Plate then stack and tower: in progress |
+| Unseen multi-step tasks (Exp. 3, 50 episodes each) | Two cubes onto two plates: 86% skills vs 88% monolith; plate then stack: 42% vs 62%; 3-cube tower: 16% vs 18%. Steps compose almost independently; stacking onto raised targets is the bottleneck for both |
 
 Skill-level experts do not make individual skills better, but they let every expert learn from all the data and
-transfer to new objects and instructions, and they make adding skills safe. The largest end-to-end gains came from
+transfer to new objects and instructions, and they make adding skills safe. Composed tasks succeed when their
+skills do: composition itself added no failures. The largest end-to-end gains came from
 executor mechanisms (grasp check + retry, release gate) and data labelling rather than from model changes.
 
 <p align="center"><img src="paper/figures/fig_architecture.png" width="760" alt="System architecture"></p>
 <p align="center"><img src="paper/figures/fig_organisation.png" width="760" alt="Monolithic vs task-level vs skill-level experts"></p>
 <p align="center"><img src="paper/figures/fig_results.png" width="760" alt="Results of experiments 4 and 2"></p>
+<p align="center"><img src="paper/figures/fig_composed.png" width="760" alt="Results of experiment 3: composed tasks"></p>
 
 ## Example videos (left head camera)
 
@@ -83,6 +85,6 @@ See [`docs/NOTES.md`](docs/NOTES.md) for every component, data set, training rec
 
 ## Status
 
-Simulation only, one arm, one object family (cubes and plates). Next: experiment 3 (composed tasks) to complete, the
-LIBERO benchmark, and a small real-robot study. The LLM planner (Ollama `qwen3-vl:8b`) is implemented but not used in
+Simulation only, one arm, one object family (cubes and plates). Experiments 1-4 are complete. Next: stacking at new
+target heights, the LIBERO benchmark, and a small real-robot study. The LLM planner (Ollama `qwen3-vl:8b`) is implemented but not used in
 the reported experiments.

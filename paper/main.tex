@@ -37,7 +37,8 @@ or risk to deployed skills, while naive fine-tuning of a monolithic model erases
 fine-tuning with replay retains them but requires the old data and full re-validation. We further report a
 failure-driven reliability study in which executor-level mechanisms---a proprioceptive grasp check with retry and
 a release gate---raise end-to-end success from 45\% to 91\% (and from 22\% to 87\% under object pushes), more than
-any model change. \todo{one sentence on composed multi-step tasks (Exp.~3).}
+any model change. On unseen multi-step tasks, skills compose almost independently for both organisations, and
+composite success is bounded by the weakest skill, here stacking onto raised targets.
 \end{abstract}
 
 %======================================================================
@@ -73,7 +74,8 @@ Figure~\ref{fig:organisation} contrasts the three organisations we compare.
 \item A modular architecture of skill-level experts on a shared frozen VLA backbone, each conditioned on a tracked
   9-D target pose and emitting a pass/fail verdict, with a robot-agnostic action space (\S\ref{sec:system}).
 \item A controlled comparison of monolithic, task-level and skill-level organisations at equal data and compute
-  (\S\ref{sec:exp1}, \S\ref{sec:exp4}), and of how each absorbs a new skill (\S\ref{sec:exp2}).
+  (\S\ref{sec:exp1}, \S\ref{sec:exp4}), of how each absorbs a new skill (\S\ref{sec:exp2}), and of how each executes
+  unseen multi-step compositions (\S\ref{sec:exp3}).
 \item A failure-driven reliability study showing that executor-level mechanisms and data labelling dominate
   end-to-end success (\S\ref{sec:reliability}).
 \item An evaluation protocol with seeded, paired episodes and per-cause failure accounting, which exposed several
@@ -317,10 +319,52 @@ Monolith, fine-tuned with replay & \textbf{68\%} & 92\% \\
 \end{table}
 
 \subsection{Experiment 3: composed multi-step tasks}\label{sec:exp3}
-\todo{Results pending. Three unseen compositions, 50 seeded episodes each, oracle skill sequences:
-\emph{pairs} (two cubes onto two plates), \emph{plate-stack} (cube onto a plate, then a second cube stacked on it),
-\emph{tower} (three-cube tower); skill experts (with the place-initialised stack expert) vs.\ the monolith
-fine-tuned with replay. Report composed success, sub-tasks completed, and error accumulation across steps.}
+We evaluate three compositions that never occur as training episodes, each with 50 seeded episodes and the oracle
+skill sequence, so that only execution is compared: \emph{two plates} (two cubes onto the two plates),
+\emph{plate-stack} (a cube onto a plate, then a second cube stacked on it) and \emph{tower} (a three-cube tower).
+The skill condition uses the pick, place and find experts with the place-initialised stack expert; the monolithic
+condition is the monolith fine-tuned with replay, which performs all skills. Success requires every sub-task to be
+on target in the final scene.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_composed.pdf}
+\caption{Experiment~3. (a) Composed success on three unseen multi-step tasks (50 paired episodes each). (b) Success
+of each step: the first sub-task, and the second given that the first succeeded. Pick-and-place steps compose
+almost independently; stacking onto raised targets (a cube on a plate, a two-cube tower) is the bottleneck.}
+\label{fig:composed}
+\end{figure*}
+
+\begin{table}[t]
+\centering\small
+\caption{Experiment 3: composed success (50 paired episodes) and step success (second step given the first).}
+\label{tab:exp3}
+\begin{tabular}{lccc}
+\toprule
+Task & Skill experts & Monolith + replay & sign test \\
+\midrule
+two plates & 86\% & 88\% & \pv{1.0} \\
+plate-stack & 42\% & 62\% & \pv{0.08} \\
+tower & 16\% & 18\% & \pv{1.0} \\
+\midrule
+\multicolumn{4}{l}{\emph{second step given the first}} \\
+2nd cube $\to$ plate & 91\% & 94\% & \\
+stack on a cube on a plate & 45\% & 65\% & \\
+stack on a two-cube tower & 26\% & 26\% & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:exp3} and Fig.~\ref{fig:composed} show three effects. First, pick-and-place steps compose almost
+independently: with 94\% on the first step and 91--94\% on the second, both approaches complete 86--88\% of the
+two-plate tasks, close to the product of the step rates. In no episode did a later step disturb an earlier
+completed one. Second, the composite rate is limited by the weakest skill: on plate-stack the first step succeeds
+in 94--96\% of episodes for both, and the gap (42\% vs.\ 62\%, $p=0.08$) comes entirely from the stacking step, in
+line with Exp.~2. Third, stacking onto raised targets degrades for both approaches: stacking on a cube that rests
+on a plate drops to 45\%/65\%, and stacking on a two-cube tower to 26\% for both, against 59\%/68\% on the table
+(Exp.~2). Those target heights never occur in the stacking demonstrations, so neither organisation extrapolates in
+height. \textbf{Composition itself works for both organisations; composite success is bounded by the individual
+skills, and both fail to extrapolate a skill to target geometry outside its demonstrations.}
 
 %======================================================================
 \section{Discussion and Limitations}
@@ -330,7 +374,8 @@ In our setting skill-level experts do not improve the accuracy of individual ski
 across objects and instructions far better than task-level experts at equal compute (Exp.~4), and they allow new
 skills to be added safely (Exp.~2). Their cost is reduced transfer between skills: a monolith trained with replay
 stacks better than an isolated stack expert, and warm-starting the new expert from a related one recovers part
-of the gap.
+of the gap. The same difference carries over to composed tasks (Exp.~3), where composite success follows the weakest
+skill.
 
 \paragraph{The role of grounding.}
 The target pose is what makes a single pick expert serve every object, and it also keeps task experts from failing
@@ -353,7 +398,8 @@ real hardware; both are the next steps.
 We studied at which granularity to define experts on a shared VLA backbone. Defining them per skill and grounding
 each skill in a tracked target pose gave much better generalisation than per-task experts, no loss against a
 monolithic model, and safe extension with new skills; executor-level mechanisms were as important as the models
-for end-to-end reliability. \todo{Exp.~3 sentence.}
+for end-to-end reliability. Composed tasks succeed when their skills do: composition itself added no failures,
+which makes the remaining gap a matter of individual skills and their training distribution.
 
 {\small
 \bibliographystyle{plain}

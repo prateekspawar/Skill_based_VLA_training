@@ -105,6 +105,23 @@ for label, exp, a, b in COMPARISONS:
         l_ = sum(ok(B[e], key) and not ok(A[e], key) for e in keys)
         rows.append({"comparison": label, "metric": metric, "episodes": len(keys), "A": a, "A_success": ra,
                      "B": b, "B_success": rb, "A_better": w, "B_better": l_, "sign_test_p": f"{sign_test(w, l_):.3g}"})
+# Experiment 3: composed success from the [compose] lines (all sub-tasks on target in the final scene).
+for c in ("pairs", "plate_stack", "tower"):
+    a_, b_ = f"{c}_mono", f"{c}_skills"
+    if ("exp3_composed", a_) not in texts or ("exp3_composed", b_) not in texts:
+        continue
+
+    def comp(text):
+        return {int(m.group(1)): m.group(2) == "SUCCESS"
+                for m in re.finditer(r"^\[compose\] +(\d+) .*?: (SUCCESS|FAIL)", text, re.M)}
+
+    A, B = comp(texts[("exp3_composed", a_)]), comp(texts[("exp3_composed", b_)])
+    keys = sorted(set(A) & set(B))
+    w = sum(A[e] and not B[e] for e in keys)
+    l_ = sum(B[e] and not A[e] for e in keys)
+    rows.append({"comparison": f"monolith+replay vs skills, composed {c}", "metric": "composed", "episodes": len(keys),
+                 "A": a_, "A_success": sum(A[e] for e in keys), "B": b_, "B_success": sum(B[e] for e in keys),
+                 "A_better": w, "B_better": l_, "sign_test_p": f"{sign_test(w, l_):.3g}"})
 with open(OUT / "summary.csv", "w", newline="") as f:
     wr = csv.DictWriter(f, fieldnames=list(rows[0]))
     wr.writeheader()

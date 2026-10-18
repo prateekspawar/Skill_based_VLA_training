@@ -6,6 +6,7 @@ fig_scene        frames of a successful evaluation episode (left head camera)
 fig_architecture system block diagram
 fig_organisation monolithic vs task-level vs skill-level experts
 fig_results      experiment 4 (task vs skill experts) and experiment 2 (adding a skill)
+fig_composed     experiment 3 (composed multi-step tasks), overall and per step
 """
 
 from pathlib import Path
@@ -201,9 +202,54 @@ def fig_results():
     save(fig, "fig_results")
 
 
+def fig_composed():
+    fig, (a, b) = plt.subplots(1, 2, figsize=(7.0, 2.3), gridspec_kw={"width_ratios": [1, 1.25]})
+    tasks = ["two cubes\n\u2192 two plates", "plate,\nthen stack", "3-cube\ntower"]
+    skills, mono = [86, 42, 16], [88, 62, 18]
+    xs = range(3)
+    w = 0.36
+    a.bar([x - w / 2 - 0.01 for x in xs], skills, w, color=BLUE, label="skill-level experts", zorder=2)
+    a.bar([x + w / 2 + 0.01 for x in xs], mono, w, color=ORANGE, label="monolith + replay", zorder=2)
+    for x, s_, m_ in zip(xs, skills, mono):
+        a.text(x - w / 2, s_ + 1.5, f"{s_}", ha="center", fontsize=5.8, color=MUTED)
+        a.text(x + w / 2, m_ + 1.5, f"{m_}", ha="center", fontsize=5.8, color=MUTED)
+    a.set_xticks(list(xs), tasks, fontsize=6.0)
+    a.set_ylim(0, 105), a.set_yticks([0, 25, 50, 75, 100])
+    a.set_ylabel("composed success (%)", fontsize=6.6)
+    a.set_title("(a) Exp. 3: unseen composed tasks (50 episodes)", fontsize=7.2, color=INK, loc="left")
+    a.legend(frameon=False, fontsize=6.0, loc="upper right")
+    # (b) per step: first sub-task, and second given the first succeeded
+    steps = ["1st cube\n\u2192 plate", "2nd cube\n\u2192 plate", "cube\n\u2192 plate", "stack on\nplated cube",
+             "stack on\ncube", "stack on\n2 cubes"]
+    sk = [94, 91, 94, 45, 62, 26]
+    mo = [94, 94, 96, 65, 68, 26]
+    xs2 = range(6)
+    b.bar([x - w / 2 - 0.01 for x in xs2], sk, w, color=BLUE, zorder=2)
+    b.bar([x + w / 2 + 0.01 for x in xs2], mo, w, color=ORANGE, zorder=2)
+    for x, s_, m_ in zip(xs2, sk, mo):
+        b.text(x - w / 2, s_ + 1.5, f"{s_}", ha="center", fontsize=5.4, color=MUTED)
+        b.text(x + w / 2, m_ + 1.5, f"{m_}", ha="center", fontsize=5.4, color=MUTED)
+    for x in (1.5, 3.5):
+        b.axvline(x, color=RULE, lw=0.8, ls="--", zorder=1)
+    for x, t in ((0.5, "two plates"), (2.5, "plate, then stack"), (4.5, "tower")):
+        b.text(x, 108, t, ha="center", fontsize=6.0, color=INK)
+    b.set_xticks(list(xs2), steps, fontsize=5.3)
+    b.set_ylim(0, 115), b.set_yticks([0, 25, 50, 75, 100])
+    b.set_ylabel("step success (%)", fontsize=6.6)
+    b.set_title("(b) per step: 1st sub-task, 2nd given the 1st succeeded", fontsize=7.2, color=INK, loc="left")
+    for ax in (a, b):
+        ax.grid(axis="y", color=RULE, lw=0.5, zorder=0)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+        ax.tick_params(length=2, width=0.5, labelsize=6.0, colors=MUTED)
+    fig.subplots_adjust(wspace=0.28)
+    save(fig, "fig_composed")
+
+
 if __name__ == "__main__":
     fig_scene()
     fig_architecture()
     fig_organisation()
     fig_results()
+    fig_composed()
     print("written:", sorted(p.name for p in OUT.glob("fig_*")))

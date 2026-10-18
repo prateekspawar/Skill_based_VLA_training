@@ -25,3 +25,6 @@ monolith+replay vs stack from place,full,150,stack_mono_replay,102,stack_skill_p
 "task vs skill, unseen bo",full,50,unseen_task_bo,24,unseen_skill_bo,47,1,24,1.55e-06
 "task vs skill, unseen rp",pick,50,unseen_task_rp,32,unseen_skill_rp,47,2,17,0.000729
 "task vs skill, unseen rp",full,50,unseen_task_rp,29,unseen_skill_rp,47,1,19,4.01e-05
+"monolith+replay vs skills, composed pairs",composed,50,pairs_mono,44,pairs_skills,43,3,2,1
+"monolith+replay vs skills, composed plate_stack",composed,50,plate_stack_mono,31,plate_stack_skills,21,18,8,0.0755
+"monolith+replay vs skills, composed tower",composed,50,tower_mono,9,tower_skills,8,6,5,1

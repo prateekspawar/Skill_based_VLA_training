@@ -446,17 +446,38 @@ Paired full success vs no gate: stationary 11 wins / 2 losses, push 14 / 4. The 
 12 / 9 episodes, all of which were then placed. It also removed the carry drops (the model loosens the grip
 before it is over the plate) and most edge releases (it can only release close to the target).
 
+### Granularity study: experiments 1-4 (2026-10-15 to 2026-10-18)
+Monolithic vs task-level vs skill-level experts at equal data and compute. Paper draft in `paper/`, per-episode
+results and paired sign tests in `paper/data/` (`summary.csv`). Drivers: `scripts/run_exp1_mono.sh`,
+`run_exp2_stack.sh`, `run_exp2b.sh`, `run_exp3_compose.sh`, `run_exp4_task_experts.sh`.
+
+| Exp. | Comparison | Result |
+|---|---|---|
+| 1 | one model (`mono9rc2_30000`, 30k steps) vs pick + place experts (2 x 15k), same frames | stationary full 93 vs 91 % (p = 0.22); push 81 vs 87 % (p = 0.12); no consistent difference |
+| 4 | task experts (one per instruction, ~115 episodes, 4 x 7.5k steps) vs skill experts | seen 56-72 vs 90-98 %, unseen (nearest expert) 48-58 vs 94 %; all p <= 0.02 |
+| 2 | adding `stack` (300 demos, 5k steps) | stack expert 53 % (100 demos 33 %), from place 59 %; place expert reused 0 %; monolith FT on stack only 0 % and forgets pick+place (0 %); monolith + replay (290 old episodes) 68 %, keeps 92 %; stacking release gate: no gain |
+| 3 | unseen compositions, oracle sequences, skills vs monolith + replay | two plates 86 vs 88 %, plate-stack 42 vs 62 % (p = 0.08), tower 16 vs 18 %; 2nd step: 2nd plate 91/94 %, stack on a plated cube 45/65 %, stack on a 2-cube tower 26/26 % |
+
+- Splitting by skill does not improve individual skills (Exp. 1); its value is that every expert learns from all
+  the data (Exp. 4) and that skills are added in isolation (Exp. 2). The monolith with replay transfers more
+  between skills (stacking) but needs the old data and re-validation on every change.
+- Steps compose almost independently; no later step disturbed an earlier one. Composite success follows the weakest
+  skill: stacking, which also does not extrapolate to target heights absent from its demos (cube on a plate, tower).
+- Bugs found on the way (fixed): composed episodes restarted later sub-tasks from the previous pose instead of home
+  (0 % composed), SAM 2 sessions accumulated GPU memory over composed episodes (server OOM), the LeRobot merge turns
+  masked NaN actions into nulls (`data/restore_nan.py`).
+
 ## 8. Not done yet / next steps
-Best (defaults: `*9rc2`, grasp check + retry, release gate, random plate colours, 150 episodes): stationary pick
-91 % / full 91 %; push pick 87 % / full 87 % (pushed cubes picked 90 %). Place fails after only 1 of 137 picks.
-1. **Pick** is now the limit (13 / 150 stationary): misses that the retries do not recover, re-detection failures.
-2. **Find failures** (6–9 / 150; blue cube sometimes not proposed by the detector) and find's "not found" verdict
-   (never right).
-3. **Re-aiming during the descent** (data): the model still closes on schedule after a late push; retries cover it.
-4. Verify the expert retreat fix (`ExpertCfg`) with a small `gen_demos` run before generating more data.
-5. **Wire in the LLM planner** (Ollama qwen3-vl:8b, `skills_schema()`), acting on the verdicts and the grasp check.
-6. Real robot: hand-eye calibration of the head (`head_in_base`), standalone IK, real stereo camera; refit the
-   colour model on real images; calibrate the gripper-opening threshold on the real gripper.
+Best system (defaults: `*9rc2`, grasp check + retry, release gate): stationary 91 / 91 %, push 87 / 87 %.
+Granularity study (experiments 1-4) complete; paper draft in `paper/` (authors and reference checks open).
+1. **Stacking** at target heights outside the demos (cube on a plate, towers): add such demos, or a height-aware
+   target representation; the stack skill bounds every composed task that uses it.
+2. **LIBERO** (Object / Spatial, then Long and PRO): standard benchmark numbers for the skill-expert architecture
+   (environment wrapper with depth, demo segmentation into skills, Franka adapter).
+3. **Real robot:** a small SO-101 study (hand-eye calibration of the head, standalone IK, real stereo camera; refit
+   the colour model and the gripper-opening thresholds on real data).
+4. Re-aiming during the descent after late pushes (retries cover it today); find failures (blue cube not proposed).
+5. LLM planner (Ollama `qwen3-vl:8b`, implemented and tested offline on composed instructions) in the loop.
 
 ## 9. File map
 ```
