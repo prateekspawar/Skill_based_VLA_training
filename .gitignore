@@ -13,3 +13,4 @@ paper/*.fdb_latexmk
 paper/*.fls
 paper/*.out
 paper/*.synctex.gz
+paper/arxiv/test_compile.pdf
