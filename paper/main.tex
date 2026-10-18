@@ -1,7 +1,7 @@
-\documentclass[10pt,twocolumn]{article}
-\usepackage[margin=0.75in]{geometry}
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
 \usepackage[T1]{fontenc}
-\usepackage{times}
+\usepackage{cite}
 \usepackage{amsmath,amssymb}
 \usepackage{booktabs}
 \usepackage{graphicx}
@@ -15,9 +15,10 @@
 \newcommand{\pv}[1]{\scriptsize{$p{=}#1$}}
 
 \title{Skill-Level Experts with Grounded Targets:\\
-Modularity, Generality and Reliability in Language-Conditioned Manipulation}
-\author{\todo{authors}}
-\date{}
+Modularity, Generality and Reliability in\\Language-Conditioned Manipulation}
+\author{\IEEEauthorblockN{\todo{Author name}}
+\IEEEauthorblockA{\todo{Affiliation}\\
+prateekspawar@gmail.com}}
 
 \begin{document}
 \maketitle
@@ -40,6 +41,10 @@ a release gate---raise end-to-end success from 45\% to 91\% (and from 22\% to 87
 any model change. On unseen multi-step tasks, skills compose almost independently for both organisations, and
 composite success is bounded by the weakest skill, here stacking onto raised targets.
 \end{abstract}
+
+\begin{IEEEkeywords}
+vision-language-action models, modular policies, skill composition, imitation learning, robot manipulation
+\end{IEEEkeywords}
 
 %======================================================================
 \section{Introduction}
@@ -401,9 +406,7 @@ monolithic model, and safe extension with new skills; executor-level mechanisms 
 for end-to-end reliability. Composed tasks succeed when their skills do: composition itself added no failures,
 which makes the remaining gap a matter of individual skills and their training distribution.
 
-{\small
-\bibliographystyle{plain}
+\bibliographystyle{IEEEtran}
 \bibliography{references}
-}
 
 \end{document}
