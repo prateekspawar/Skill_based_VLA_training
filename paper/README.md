@@ -9,4 +9,4 @@ Build (TeX Live is not installed on this machine; Overleaf works with the two fi
     latexmk -pdf main.tex      # or: pdflatex main && bibtex main && pdflatex main && pdflatex main
 
 Numbers come from the evaluation logs under `outputs/` (paired sign tests computed per comparison); see
-README.md section 7 for the runs.
+docs/NOTES.md section 7 for the runs; per-episode results and sign tests are in `data/`.

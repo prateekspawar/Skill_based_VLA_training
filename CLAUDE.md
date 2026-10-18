@@ -1,6 +1,7 @@
 # Notes for Claude
 
-- Read `README.md` first: section 1 is the current architecture, section 7 the latest results, section 8 the open work.
+- Read `docs/NOTES.md` first (the technical notebook; `README.md` is the public project page): section 1 is the current
+  architecture, section 7 the latest results, section 8 the open work.
   Update those sections whenever the architecture or results change.
 - Two Python environments: simulation in `~/isaacsim` (scripts that import Isaac Lab), policies/perception in
   `~/lerobot-env`. They communicate through `so101_lang/serve/policy_server.py`.

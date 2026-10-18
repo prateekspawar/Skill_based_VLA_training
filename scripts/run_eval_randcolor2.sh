@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Random plate colours (README section 7, 2026-10-09): new vs old skill models, retry vs fused find,
+# Random plate colours (docs/NOTES.md section 7, 2026-10-09): new vs old skill models, retry vs fused find,
 # 150 seeded episodes each, outputs in outputs/stage_rc_eval2.
 # (The original run also had a 50-episode time-out check with --episode_length_s 18.)
 set -uo pipefail

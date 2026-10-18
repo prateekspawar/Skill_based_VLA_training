@@ -1,0 +1,27 @@
+comparison,metric,episodes,A,A_success,B,B_success,A_better,B_better,sign_test_p
+"final vs baseline, stationary",pick,150,final_still,137,baseline_still,110,30,3,1.4e-06
+"final vs baseline, stationary",full,150,final_still,136,baseline_still,68,71,3,7.16e-18
+"final vs baseline, push",pick,150,final_push,131,baseline_push,46,85,0,5.17e-26
+"final vs baseline, push",full,150,final_push,130,baseline_push,33,97,0,1.26e-29
+"monolith vs skills, stationary",pick,150,mono_still,141,skills_still,137,4,0,0.125
+"monolith vs skills, stationary",full,150,mono_still,140,skills_still,136,5,1,0.219
+"monolith vs skills, push",pick,150,mono_push,121,skills_push,131,5,15,0.0414
+"monolith vs skills, push",full,150,mono_push,122,skills_push,130,6,14,0.115
+stack 300 vs 100 demos,pick,150,stack_skill_300,135,stack_skill_100,136,1,2,1
+stack 300 vs 100 demos,full,150,stack_skill_300,80,stack_skill_100,50,43,13,7.33e-05
+stack from place vs from scratch,pick,150,stack_skill_place300,140,stack_skill_300,135,5,0,0.0625
+stack from place vs from scratch,full,150,stack_skill_place300,89,stack_skill_300,80,27,18,0.233
+monolith+replay vs stack from place,pick,150,stack_mono_replay,138,stack_skill_place300,140,2,4,0.688
+monolith+replay vs stack from place,full,150,stack_mono_replay,102,stack_skill_place300,89,32,19,0.0919
+"task vs skill, seen bb",pick,50,seen_task_bb,37,seen_skill_bb,46,2,11,0.0225
+"task vs skill, seen bb",full,50,seen_task_bb,36,seen_skill_bb,45,2,11,0.0225
+"task vs skill, seen ry",pick,50,seen_task_ry,33,seen_skill_ry,49,0,16,3.05e-05
+"task vs skill, seen ry",full,50,seen_task_ry,29,seen_skill_ry,48,1,20,2.1e-05
+"task vs skill, seen bw",pick,50,seen_task_bw,40,seen_skill_bw,48,0,8,0.00781
+"task vs skill, seen bw",full,50,seen_task_bw,36,seen_skill_bw,48,0,12,0.000488
+"task vs skill, seen rg",pick,50,seen_task_rg,33,seen_skill_rg,49,1,17,0.000145
+"task vs skill, seen rg",full,50,seen_task_rg,28,seen_skill_rg,49,1,22,5.72e-06
+"task vs skill, unseen bo",pick,50,unseen_task_bo,34,unseen_skill_bo,48,0,14,0.000122
+"task vs skill, unseen bo",full,50,unseen_task_bo,24,unseen_skill_bo,47,1,24,1.55e-06
+"task vs skill, unseen rp",pick,50,unseen_task_rp,32,unseen_skill_rp,47,2,17,0.000729
+"task vs skill, unseen rp",full,50,unseen_task_rp,29,unseen_skill_rp,47,1,19,4.01e-05
