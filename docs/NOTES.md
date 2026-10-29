@@ -514,7 +514,8 @@ scripts/
 train/                         training launchers
 tests/                         frame-maths tests
 hardware/                      prints/ (all STLs), so101_gripper/ (sim gripper source files), stereo_head/
-                               (parametric stereo plate), objects/ (cube + plate generator)
+                               (parametric stereo plate), objects/ (cube + plate generator), calibration/
+                               (ChArUco boards, hand-eye jaw clamp + board plate)
 models/ (git-ignored)          Fast-FoundationStereo ONNX + TensorRT cache, smolvla_depth base config
 datasets/, checkpoints/, outputs/ (git-ignored)
 ```
