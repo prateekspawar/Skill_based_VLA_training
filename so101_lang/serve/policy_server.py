@@ -27,6 +27,7 @@ from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 import so101_lang.policies.smolvla_depth  # noqa: F401  (registers smolvla_depth for loading)
 from so101_lang.data.hdf5_to_lerobot import DEPTH_KINDS, POINTMAP_SIZE, make_depth_backend
 from so101_lang.perception.stereo_depth import depth_to_pointmap, depth_to_rgb
+from so101_lang.robots import virtual_head
 
 RENAME = {
     "observation.images.left": "observation.images.camera1",
@@ -34,6 +35,24 @@ RENAME = {
     "observation.images.depth": "observation.images.camera3",
 }
 AUTHKEY = b"so101_lang"
+# Virtual head (so101_lang.robots.virtual_head): perception measures in the real camera's head frame; everything
+# exchanged with the simulator (targets, robot keypoints) and the point map the models get is in the policy frame.
+POLICY_FROM_REAL = virtual_head.policy_from_real()
+REAL_FROM_POLICY = np.linalg.inv(POLICY_FROM_REAL)
+
+
+def to_policy(x):
+    return {k: virtual_head.apply(POLICY_FROM_REAL, v) for k, v in x.items()} if isinstance(x, dict) \
+        else virtual_head.apply(POLICY_FROM_REAL, x)
+
+
+def to_real(x):
+    return virtual_head.apply(REAL_FROM_POLICY, x)
+
+
+def real_calibration(calib: dict) -> dict:
+    """The training calibration with head_in_base moved to the real camera (identity offset: unchanged)."""
+    return {**calib, "head_in_base": (np.asarray(calib["head_in_base"]) @ virtual_head.real_in_virtual()).tolist()}
 
 
 def to_image(rgb: np.ndarray, device: str) -> torch.Tensor:
@@ -84,7 +103,7 @@ def build_obs(msg: dict, depth) -> dict:
         if depth.uses["camera"]:
             obs["observation.images.depth"] = to_image(depth_to_rgb(z, depth.cfg.near, depth.cfg.far), "cuda")
         if depth.uses["pointmap"]:
-            pm = depth_to_pointmap(z, depth.uses["calibration"], POINTMAP_SIZE)
+            pm = virtual_head.apply_pointmap(POLICY_FROM_REAL, depth_to_pointmap(z, depth.uses["calibration"], POINTMAP_SIZE))
             obs["observation.pointmap"] = torch.from_numpy(pm).unsqueeze(0).cuda()
     return obs
 
@@ -130,6 +149,9 @@ def main():
     active = "pick"
     locator = None  # created on the first "locate"/"track" request
     sam2 = None  # SAM2 point tracker, created on the first "sam2_start" request
+    if not np.allclose(virtual_head.real_in_virtual(), np.eye(4)):
+        print(f"[server] camera offset {os.environ.get('SO101_CAM_OFFSET')}; virtual head "
+              f"{'on' if virtual_head.enabled() else 'off'}", flush=True)
     print(f"[server] {cfg.type} loaded from {ckpt}; depth={'on' if depth else 'off'}; listening on :{args.port}", flush=True)
 
     with Listener(("localhost", args.port), authkey=AUTHKEY) as listener:
@@ -158,18 +180,21 @@ def main():
                             from so101_lang.perception.locate import TargetLocator
 
                             calib_path = args.calibration or json.loads((ckpt / "train_config.json").read_text())["dataset"]["root"] + "/meta/stereo_calibration.json"
-                            locator = TargetLocator(json.loads(Path(calib_path).read_text()))
+                            locator = TargetLocator(real_calibration(json.loads(Path(calib_path).read_text())))
                         t0 = time.time()
+                        for key in ("robot_points", "prior_point", "base_point", "true_point"):
+                            if msg.get(key) is not None:
+                                msg[key] = to_real(msg[key])
                         if msg["cmd"] == "locate":
                             point, info = locator.locate(msg["left"], msg["right"], msg["query"])
-                            conn.send({"point": point, **info, "t_locate": time.time() - t0})
+                            conn.send({"point": to_policy(point), **info, "t_locate": time.time() - t0})
                             continue
                         if msg["cmd"] == "locate9":  # find(): 9-D pose of the named object
                             from so101_lang.perception.locate import locate9
 
                             pose, info = locate9(locator, msg["left"], msg["right"], msg["query"],
                                                  msg.get("robot_points"), msg.get("prior_point"))
-                            conn.send({"pose9": pose, **info, "t_locate": time.time() - t0})
+                            conn.send({"pose9": to_policy(pose), **info, "t_locate": time.time() - t0})
                             continue
                         if sam2 is None:
                             from so101_lang.perception.sam2_tracker import Sam2MultiTracker
@@ -223,9 +248,9 @@ def main():
                                 name_ok, margin = verify_name(locator, msg["left"], msg["query"])
                             points, info = sam2.add(msg["left"], msg["right"], msg["query"], robot_points,
                                                     msg.get("prior_point"), msg.get("base_point"))
-                            conn.send({"pose9": pose, "score": linfo["score"], "name_ok": name_ok, "name_margin": margin,
+                            conn.send({"pose9": to_policy(pose), "score": linfo["score"], "name_ok": name_ok, "name_margin": margin,
                                        "detect": linfo.get("detect", {}),
-                                       "points": points, "info": info, "t_locate": time.time() - t0})
+                                       "points": to_policy(points), "info": info, "t_locate": time.time() - t0})
                             continue
                         if msg["cmd"] == "sam2_start":
                             points, info = sam2.start(msg["left"], msg["right"], msg["queries"], robot_points)
@@ -233,7 +258,7 @@ def main():
                             points, info = sam2.update(
                                 msg["left"], msg["right"], robot_points, frozen=tuple(msg.get("frozen", ()))
                             )
-                        conn.send({"points": points, "info": info, "t_locate": time.time() - t0})
+                        conn.send({"points": to_policy(points), "info": info, "t_locate": time.time() - t0})
                         continue
                     t0 = time.time()
                     obs = build_obs(msg, depth)

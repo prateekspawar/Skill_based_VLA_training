@@ -96,6 +96,37 @@ def stereo_head_poses(center, target, baseline):
 LEFT_CAM_POS, RIGHT_CAM_POS, HEAD_QUAT = stereo_head_poses(HEAD_CENTER, HEAD_TARGET, STEREO_BASELINE)
 
 
+def _quat_xyzw_to_matrix(q) -> np.ndarray:
+    x, y, z, w = q
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                     [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                     [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def _matrix_to_quat_xyzw(r: np.ndarray) -> tuple[float, ...]:
+    w = math.sqrt(max(0.0, 1.0 + r[0, 0] + r[1, 1] + r[2, 2])) / 2
+    x = math.copysign(math.sqrt(max(0.0, 1.0 + r[0, 0] - r[1, 1] - r[2, 2])) / 2, r[2, 1] - r[1, 2])
+    y = math.copysign(math.sqrt(max(0.0, 1.0 - r[0, 0] + r[1, 1] - r[2, 2])) / 2, r[0, 2] - r[2, 0])
+    z = math.copysign(math.sqrt(max(0.0, 1.0 - r[0, 0] - r[1, 1] + r[2, 2])) / 2, r[1, 0] - r[0, 1])
+    return (x, y, z, w)
+
+
+def rendered_head_pose():
+    """Where the stereo cameras are actually rendered: the training head pose moved by SO101_CAM_OFFSET
+    (so101_lang.robots.virtual_head). Returns (left_pos, right_pos, quat_xyzw, head_in_env 4x4)."""
+    from so101_lang.robots.virtual_head import real_in_virtual
+
+    h = np.eye(4)
+    h[:3, :3], h[:3, 3] = _quat_xyzw_to_matrix(HEAD_QUAT), HEAD_CENTER
+    real = h @ real_in_virtual()
+    half = real[:3, :3] @ np.array([0.0, STEREO_BASELINE / 2, 0.0])
+    return (tuple((real[:3, 3] + half).tolist()), tuple((real[:3, 3] - half).tolist()),
+            _matrix_to_quat_xyzw(real[:3, :3]), real)
+
+
+RENDER_LEFT_CAM_POS, RENDER_RIGHT_CAM_POS, RENDER_HEAD_QUAT, _ = rendered_head_pose()
+
+
 def _stereo_cam_cfg(name: str, pos) -> CameraCfg:
     return CameraCfg(
         prim_path=f"{{ENV_REGEX_NS}}/StereoHead/{name}",
@@ -106,7 +137,7 @@ def _stereo_cam_cfg(name: str, pos) -> CameraCfg:
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=STEREO_FOCAL_LENGTH, horizontal_aperture=STEREO_APERTURE, clipping_range=(0.05, 3.0)
         ),
-        offset=CameraCfg.OffsetCfg(pos=pos, rot=HEAD_QUAT, convention="world"),
+        offset=CameraCfg.OffsetCfg(pos=pos, rot=RENDER_HEAD_QUAT, convention="world"),
     )
 
 
@@ -194,8 +225,8 @@ class PickPlaceSceneCfg(InteractiveSceneCfg):
     plate_0 = _plate_cfg(0)
     plate_1 = _plate_cfg(1)
 
-    left_cam = _stereo_cam_cfg("left_cam", LEFT_CAM_POS)
-    right_cam = _stereo_cam_cfg("right_cam", RIGHT_CAM_POS)
+    left_cam = _stereo_cam_cfg("left_cam", RENDER_LEFT_CAM_POS)
+    right_cam = _stereo_cam_cfg("right_cam", RENDER_RIGHT_CAM_POS)
 
 
 @configclass

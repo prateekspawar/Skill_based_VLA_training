@@ -83,6 +83,13 @@ best push result): `d2_pointmap_20000`.
   (find gets zeros) to the state and `[done, success]` to the action.
 - **Relative actions:** the first 9 action dims are trained as `action_norm − state_norm` and the state is added
   back at inference (`relative_action_dims=9`); exactly invertible.
+- **Virtual head** (`so101_lang/robots/virtual_head.py`): the models always see the training head pose. A real
+  camera mounted elsewhere is given as `SO101_CAM_OFFSET="dx,dy,dz,roll,pitch,yaw"` (m, deg, Rz·Ry·Rx; the real
+  camera's pose in the training head frame, i.e. hand-eye calibration result relative to the training pose).
+  The policy server measures in the real camera frame (stereo, OWLv2/SAM2, with the real `head_in_base`) and
+  converts the point map, found points and poses into the training frame; inputs given in the training frame
+  (robot points, prior/base/true points) go the other way. `SO101_VIRTUAL_HEAD=0` turns this off (the real frame
+  is passed straight to the models). No retraining; the image itself is not re-rendered.
 
 ### Skills (`so101_lang/language.py`)
 | Skill | Parameter (allowed values) | Canonical step text |
@@ -478,6 +485,21 @@ mount: 34/37 full vs 33/37 with it (flips both ways), so the real robot does not
 `outputs/eval_nomount/`. Print files for the real setup (SO-101 gripper, a stereo plate for two
 Arducam IMX219 boards, cubes, plates) are in `hardware/prints/`.
 
+### Camera pose offset with the virtual head (2026-10-30; 50 seeded stationary episodes, same scenes as `eval_gate`)
+The rendered stereo head is moved away from the training pose (`scripts/run_camera_offset.sh`,
+`outputs/camera_offset/`); the models are unchanged. Baseline on the same 50 scenes: 46/50.
+
+| Offset | Virtual head | Full pick+place | Lost / gained vs baseline | Find error, cube / plate (median) |
+|---|---|---|---|---|
+| small: (-10, 15, 10) mm, (1, 2, -2) deg | on | 47/50 | 1 / 2 | 1 / 7 mm |
+| large: (-25, 35, 20) mm = 47 mm, (2, 4, -4) deg = 6.05 deg | on | 47/50 | 2 / 3 | 1 / 6 mm |
+| large | off | 3/50 | 43 / 0 (sign p < 1e-12) | 2 / 7 mm |
+
+With the virtual head a camera mounted up to about 5 cm and 6 deg off the training pose costs nothing, provided the
+hand-eye calibration measures where it is. Without it the policies fail (pick 41/50 but place 3/50): perception
+still finds the objects, but the state, targets and point map arrive in a frame the models never saw. The real head
+need not match the training pose exactly; it needs to be calibrated.
+
 ## 8. Not done yet / next steps
 Best system (defaults: `*9rc2`, grasp check + retry, release gate): stationary 91 / 91 %, push 87 / 87 %.
 Granularity study (experiments 1-4) complete; paper draft in `paper/` (authors and reference checks open).
@@ -486,7 +508,11 @@ Granularity study (experiments 1-4) complete; paper draft in `paper/` (authors a
 2. **LIBERO** (Object / Spatial, then Long and PRO): standard benchmark numbers for the skill-expert architecture
    (environment wrapper with depth, demo segmentation into skills, Franka adapter).
 3. **Real robot:** a small SO-101 study (hand-eye calibration of the head, standalone IK, real stereo camera; refit
-   the colour model and the gripper-opening thresholds on real data).
+   the colour model and the gripper-opening thresholds on real data). Camera pose: virtual head (done, above);
+   calibration targets in `hardware/calibration/`. Setup: Raspberry Pi 5 with both IMX219s on its two CSI ports and
+   the Waveshare Bus Servo Adapter (A) on USB (jumpers on B, USB-SERVO); the PC runs perception, policies and IK
+   and talks to a small host on the Pi over wired Ethernet (ZeroMQ, as LeRobot's LeKiwi). Real images must be
+   rectified to the training intrinsics (512 x 512, fx 781.87 px, 60 mm baseline).
 4. Re-aiming during the descent after late pushes (retries cover it today); find failures (blue cube not proposed).
 5. LLM planner (Ollama `qwen3-vl:8b`, implemented and tested offline on composed instructions) in the loop.
 

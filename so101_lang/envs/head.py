@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import torch
 
-from so101_lang.robots import frames
+from so101_lang.robots import frames, virtual_head
 
 from .pick_place_env_cfg import HEAD_CENTER, HEAD_QUAT, LEFT_CAM_POS, RIGHT_CAM_POS, STEREO_BASELINE, stereo_intrinsics
 
 
 def head_in_env(device) -> torch.Tensor:
+    """Pose of the head frame the models use: the training pose. With a camera offset (SO101_CAM_OFFSET) and the
+    virtual head off (SO101_VIRTUAL_HEAD=0), the rendered camera's own pose instead (so101_lang.robots.virtual_head)."""
     pos = torch.tensor(HEAD_CENTER, dtype=torch.float32, device=device)
     rot = frames.quat_to_matrix(torch.tensor(HEAD_QUAT, dtype=torch.float32, device=device))
-    return frames.make_transform(pos, rot)
+    h = frames.make_transform(pos, rot)
+    if not virtual_head.enabled():
+        h = h @ torch.tensor(virtual_head.real_in_virtual(), dtype=torch.float32, device=device)
+    return h
 
 
 def head_in_base(env) -> torch.Tensor:
