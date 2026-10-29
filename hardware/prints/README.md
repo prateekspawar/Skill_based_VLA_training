@@ -13,3 +13,26 @@ All print files in one place: 3-D prints and the paper calibration boards (units
 | `handeye_jaw_clamp.stl` | Clamp that holds the board plate on the SO-101 fixed jaw during hand-eye calibration | 1 | same |
 | `charuco_handeye_5x5_18mm.pdf` | Hand-eye ChArUco board, 5 x 5 squares of 18 mm; print on A4 at 100 %, glue on the board plate | 1 | [`../calibration/`](../calibration/README.md) |
 | `charuco_stereo_8x11_22mm.pdf` | ChArUco board for the stereo cameras' own calibration, 8 x 11 squares of 22 mm; print on A4 at 100 %, glue on foam board | 1 | same |
+
+## Printing
+
+Any FDM printer with a 0.4 mm nozzle and a bed of 120 mm or more (largest part: the 98 mm board plate), e.g. Bambu
+A1 / A1 mini, Prusa MK4 / Mini, Ender-3 V3. No resin printer needed. Print a calibration cube first and check it
+with calipers: the stereo plate pins and the jaw clamp depend on accurate dimensions.
+
+| Part | Material | Settings | Notes |
+|---|---|---|---|
+| Gripper body + moving jaw | PLA+ or PETG | 0.2 mm layers, 3-4 walls, 30-40 % infill, supports on | As in the standard SO-101 build; PETG is tougher around the screws |
+| `stereo_plate.stl` | PETG (PLA works) | 0.12-0.16 mm layers, 4 walls, 40 % infill, flat, pins up | The 1.9 mm pins are delicate; PETG snaps less |
+| `handeye_jaw_clamp.stl` | PETG | 0.16-0.2 mm layers, 100 % infill, as oriented (z up), no supports | PLA slowly loosens under constant clamping force |
+| `handeye_board_plate.stl` | PLA | 0.2 mm layers, 4 walls, 30 % infill, flat, countersinks up, brim | PLA warps less; the board must stay flat |
+| `cube.stl` (x4) | PLA, one colour each | 0.2 mm layers, 15-20 % infill | Saturated red, green, blue, yellow as in simulation |
+| `plate_decagon.stl` (x2+) | PLA, matte | 0.2 mm layers, 15 % infill | Saturated colours, not pale pink or white (those cause wrong-plate detections); matte avoids reflections |
+
+ChArUco boards (`charuco_*.pdf`, paper): laser printer, matte paper, 100 % / actual size; glossy inkjet prints
+reflect light and make corner detection less accurate. Measure the 50 mm bar and one square with calipers and use the
+measured size. Mount the stereo board on something flat and rigid (foam board, acrylic, glass); glue the hand-eye
+board onto the board plate with spray adhesive, without bubbles. A print shop can print the boards on aluminium
+composite (dibond) for perfect flatness; paper on a rigid backing is enough here.
+
+Hardware for the hand-eye clamp: 1x M3 x 16 screw + M3 nut (pinch), 2x M3 x 8 countersunk screws (plate).
