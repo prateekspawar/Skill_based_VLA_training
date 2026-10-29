@@ -475,7 +475,7 @@ run_exp2_stack.sh / run_exp2b.sh = Exp. 3, run_exp3_compose.sh = Exp. 4.)
 The Isaac SO-101 USD's `Sensor` variant adds a wrist camera mount (mesh + collision) to the gripper; it is in every
 training image (about 4 % of the head view). `SO101_NO_CAMERA_MOUNT=1` selects the `none` variant. Without the
 mount: 34/37 full vs 33/37 with it (flips both ways), so the real robot does not need it. Run stopped at 37 episodes;
-`outputs/eval_nomount/`. Print files for the real setup (SO-101 gripper, the extracted mount, a stereo plate for two
+`outputs/eval_nomount/`. Print files for the real setup (SO-101 gripper, a stereo plate for two
 Arducam IMX219 boards, cubes, plates) are in `hardware/prints/`.
 
 ## 8. Not done yet / next steps
