@@ -471,6 +471,13 @@ run_exp2_stack.sh / run_exp2b.sh = Exp. 3, run_exp3_compose.sh = Exp. 4.)
   (0 % composed), SAM 2 sessions accumulated GPU memory over composed episodes (server OOM), the LeRobot merge turns
   masked NaN actions into nulls (`data/restore_nan.py`).
 
+### Wrist camera mount removed (2026-10-29; 37 of 50 seeded stationary episodes, same scenes as `eval_gate`)
+The Isaac SO-101 USD's `Sensor` variant adds a wrist camera mount (mesh + collision) to the gripper; it is in every
+training image (about 4 % of the head view). `SO101_NO_CAMERA_MOUNT=1` selects the `none` variant. Without the
+mount: 34/37 full vs 33/37 with it (flips both ways), so the real robot does not need it. Run stopped at 37 episodes;
+`outputs/eval_nomount/`. Print files for the real setup (SO-101 gripper, the extracted mount, a stereo plate for two
+Arducam IMX219 boards, cubes, plates) are in `hardware/prints/`.
+
 ## 8. Not done yet / next steps
 Best system (defaults: `*9rc2`, grasp check + retry, release gate): stationary 91 / 91 %, push 87 / 87 %.
 Granularity study (experiments 1-4) complete; paper draft in `paper/` (authors and reference checks open).
@@ -506,6 +513,8 @@ scripts/
   *.py                         diagnostics and benchmarks (depth, detection, SAM2, latency, sensitivity)
 train/                         training launchers
 tests/                         frame-maths tests
+hardware/                      prints/ (all STLs), so101_gripper/ (sim gripper source files), stereo_head/
+                               (parametric stereo plate), objects/ (cube + plate generator)
 models/ (git-ignored)          Fast-FoundationStereo ONNX + TensorRT cache, smolvla_depth base config
 datasets/, checkpoints/, outputs/ (git-ignored)
 ```

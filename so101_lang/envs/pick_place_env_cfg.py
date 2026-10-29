@@ -277,6 +277,10 @@ class SO101PickPlaceIkEnvCfg(stack_ik_abs_env_cfg.SO101CubeStackEnvCfg):
         self.scene.robot = parent_scene.robot
         self.scene.ee_frame = parent_scene.ee_frame
         self.scene.robot.spawn.semantic_tags = [("class", "robot")]
+        if os.environ.get("SO101_NO_CAMERA_MOUNT", "0") == "1":
+            # The USD "Sensor" variant adds a wrist camera mount (mesh + collision) to the gripper; "none" drops it.
+            self.scene.robot.spawn = self.scene.robot.spawn.replace(
+                variants={**self.scene.robot.spawn.variants, "Sensor": "none"})
         self.scene.table.spawn.semantic_tags = [("class", "table")]
 
         self.events = EventsCfg()

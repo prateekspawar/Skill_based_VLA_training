@@ -62,6 +62,8 @@ media/               README animation and example videos
 docs/NOTES.md        full technical notebook: architecture, data, training, perception, evaluation, results log,
                      open work
 docs/context/        working notes kept across sessions
+hardware/            print files for a real setup (hardware/prints/): SO-101 gripper, stereo camera plate,
+                     task cube and plate at simulation size
 train/, tests/       training launchers, frame-maths tests
 ```
 
