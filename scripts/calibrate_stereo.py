@@ -177,6 +177,10 @@ def solve(args):
                for o, i, r, t in zip(obj, img, rv, tv)]
         return rms, K, D, np.array(per)
 
+    fixed = json.loads(Path(args.intrinsics).read_text()) if args.intrinsics else None
+    if fixed:
+        print(f"intrinsics fixed from {args.intrinsics}: solving the left-right pose only")
+
     def stereo(keep, Kl, Dl, Kr, Dr):
         obj, pl, pr = [], [], []
         for v in keep:
@@ -187,14 +191,19 @@ def solve(args):
             pr.append(cr[np.searchsorted(ir, common)].astype(np.float32))
         crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 200, 1e-7)
         out = cv2.stereoCalibrateExtended(obj, pl, pr, Kl, Dl, Kr, Dr, size, None, None, None, None,
-                                          flags=cv2.CALIB_USE_INTRINSIC_GUESS, criteria=crit)
+                                          flags=cv2.CALIB_FIX_INTRINSIC if fixed else cv2.CALIB_USE_INTRINSIC_GUESS,
+                                          criteria=crit)
         rms, Kl, Dl, Kr, Dr, R, T, E, F, _, _, per = out
         return rms, Kl, Dl, Kr, Dr, R, T, per.max(1), (obj, pl, pr)
 
     keep = [v for v in views if min(len(v["L"][1]), len(v["R"][1]), len(np.intersect1d(v["L"][1], v["R"][1]))) >= 12]
     for it in range(3):  # drop views whose stereo error is far above the rest, re-solve
-        rl, Kl, Dl, pel = mono("L", keep)
-        rr, Kr, Dr, per_ = mono("R", keep)
+        if fixed:  # the lenses did not change, only how the cameras sit on the plate
+            Kl, Dl, Kr, Dr = (np.array(fixed[c][k], float) for c in ("left", "right") for k in ("K", "D"))
+            rl, rr = fixed["rms_px"]["left"], fixed["rms_px"]["right"]
+        else:
+            rl, Kl, Dl, pel = mono("L", keep)
+            rr, Kr, Dr, per_ = mono("R", keep)
         rs, Kl, Dl, Kr, Dr, R, T, pes, pts = stereo(keep, Kl, Dl, Kr, Dr)
         bad = [i for i, e in enumerate(pes) if e > max(3 * np.median(pes), 0.6)]
         print(f"pass {it}: {len(keep)} views | RMS left {rl:.3f} px, right {rr:.3f} px, stereo {rs:.3f} px"
@@ -223,6 +232,8 @@ def solve(args):
         "P2": P2.tolist(), "Q": Q.tolist(), "distortion_model": "standard (k1 k2 p1 p2 k3)",
         "convention": "left = cam1 (stereo_config.json); T, R map left-camera coordinates to the right camera [m]",
     }
+    if fixed:
+        res["intrinsics_from"] = {"file": args.intrinsics, "n_views": fixed["n_views"], "rms_px": fixed["rms_px"]}
     (d / "stereo_calib.json").write_text(json.dumps(res, indent=1))
     print(json.dumps({k: res[k] for k in ("n_views", "rms_px", "rectified_row_error_px", "baseline_mm", "T_mm",
                                           "R_deg")}, indent=1))
@@ -253,5 +264,7 @@ if __name__ == "__main__":
     s = sub.add_parser("solve")
     s.add_argument("dir")
     s.add_argument("--square", type=float, default=22.0, help="measured square size [mm]")
+    s.add_argument("--intrinsics", help="stereo_calib.json whose K, D to keep (re-solve only the left-right pose, "
+                                        "e.g. after a camera moved on the plate)")
     a = ap.parse_args()
     capture(a) if a.cmd == "capture" else solve(a)

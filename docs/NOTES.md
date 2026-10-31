@@ -593,6 +593,20 @@ Granularity study (experiments 1-4) complete; paper draft in `paper/` (authors a
      2.6°, fx ~1236 px = **55° horizontal FOV** (the seller's 72° is wrong; matches the v1 camera's 53.5°). The
      sim's 36° view is a ~800 px centre crop resized to 512. The 8-coefficient rational lens model folds back
      before the image corners; the standard 5-coefficient model fits equally well (0.003 px worse);
+   * **the camera modules do not hold their left-right pose**: rows drifted 7.6 px, 9.8 px (after tightening the
+     screws), then ~57 px (~2° tilt) within one session. The OV5647 sensor sits on a daughterboard held by foam
+     tape; fix the modules mechanically (glue) before trusting stereo depth. `calibrate_stereo.py solve
+     --intrinsics <json>` re-solves only the left-right pose; the hand-eye solve re-measures it from its views;
+   * hand-eye (`scripts/calibrate_handeye.py`, result `real/handeye.json`): the 90 mm board on the **moving jaw**
+     (its opening is a sixth joint, so the steep head view can see the board face-on; on the fixed jaw it stayed
+     55-65° oblique and mostly edge-on). The planner picks roll + opening to face the camera, rejects poses where
+     the arm hides the board and keeps the gripper, board and paths clear of table, base and head. 27 views:
+     **4.3 px RMS**; joint zero offsets fitted: shoulder_lift +2.5°, elbow_flex −2.0°, **wrist_flex −6.0°**
+     (true = reading + offset; the ~+8° straight-wrist reading). Repeat visit: 0.9 mm / 0.2° not explained by
+     the joints (the arm settles ~1.3° differently by approach direction). Head vs the training head:
+     `SO101_CAM_OFFSET=0.0368,-0.0112,0.0096,-3.82,0.61,0.00`. Isaac's SO-101 USD differs from the URDF (base
+     body frame, no 2.8° wrist tilt): `real/kinematics.py` (numpy FK, `SIM_BASE_FROM_BASE`) matches Isaac to 0 mm;
+   * 12 V supply sagged to 8.9 V on one large multi-joint move (safety stop); moves run at 10°/s now;
    * arm: LeRobot calibration done (`so101_follower`), all six joint directions match `so101_new_calib`, middle
      pose reads ~0° except wrist_flex ~+8° (offset in software if it matters);
    * powered hold and ±5° steps on every joint pass with `real/arm_host.py`. LeRobot's P = 16 leaves ~3° of
@@ -620,7 +634,8 @@ so101_lang/
   serve/policy_server.py       skill models + perception server; serve/skills.py shared-backbone swapping
   real/                        Pi-side hosts, copied to the Pi as ~/so101_real: arm_host.py (+ arm_cmd.py client,
                                arm_config.json: per-joint gains, caps, safety limits, applied at every start),
-                               stereo_host.py (+ stereo_config.json); stereo_calib.json (the head's calibration)
+                               stereo_host.py (+ stereo_config.json); stereo_calib.json, handeye.json (the head's
+                               calibrations); kinematics.py (numpy FK from the URDF + the sim asset's differences)
   train_cli.py                 lerobot-train with the plugin registered
 scripts/
   run_stage_randcolor.sh       data generation → conversion → targets → per-skill datasets → training
@@ -632,6 +647,7 @@ scripts/
   run_eval_randcolor2.sh       the 2026-10-09 comparison (new vs old models, retry vs fused find)
   eval_policy.py               closed-loop evaluation;  gen_demos / gen_fail_demos / gen_find_demos.py: recorders
   calibrate_stereo.py          real head: ChArUco capture window (auto-saves diverse still pairs) + stereo solve
+  calibrate_handeye.py         real head in the arm base: drives the arm (planned, path-checked poses) + solve
   *.py                         diagnostics and benchmarks (depth, detection, SAM2, latency, sensitivity)
 train/                         training launchers
 tests/                         frame-maths tests, planner instruction set
