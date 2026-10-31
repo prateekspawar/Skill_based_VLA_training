@@ -17,9 +17,13 @@ Design goals (from the project owner):
  user goal: "put the red cube on the green plate"
         │
         ▼
- ① Planner        NOT WIRED IN YET. Evaluation uses an oracle planner (scripts/eval_policy.py) that emits
-                  find(cube), find(plate), pick(cube), place(plate). Function list for the LLM (Ollama
-                  qwen3-vl:8b): language.skills_schema().
+ ① Planner        so101_lang/planner.py (eval_policy.py --planner llm; default: oracle sequences). The LLM
+                  (Ollama qwen3-vl:8b-instruct, no training) only states goals "cube X on Y", constrained to a
+                  JSON schema of the scene's objects; code orders them (supports first), turns them into
+                  pick / place / stack calls and validates them; find runs before every call. Re-planning
+                  (--replan): after each sub-task open, go home, check every goal (perception or simulator
+                  truth) and run the next unmet goal whose support is in place, ≤ 3 attempts per goal; the
+                  LLM is not asked again.
         │
         ▼
  ② find(object)   per object:
@@ -67,7 +71,7 @@ Process layout (two Python environments that talk over a local socket):
 |---|---|---|
 | Simulator + evaluation loop | `~/isaacsim` (Isaac Sim 6.1, Isaac Lab 3.0) | `scripts/eval_policy.py`, environment, adapter, IK |
 | Policy server | `~/lerobot-env` (LeRobot 0.6.1, PyTorch 2.11 cu130, TensorRT 10.16) | `so101_lang/serve/policy_server.py`: skill models (shared 350 M backbone + 101 M per skill, 0.8 ms swap), OWLv2, SAM2.1-small, Fast-FoundationStereo |
-| Planner LLM (not wired in yet) | Ollama in `~/.local/ollama` | `qwen3-vl:8b` |
+| Planner LLM | Ollama in `~/.local/ollama` | `qwen3-vl:8b-instruct` (on the CPU next to the simulator: with it on the GPU the policy server runs out of memory) |
 
 Current models (served by default): `checkpoints/pick9rc2_15000`, `place9rc2_15000`, `find9rc_15000`. Previous:
 `pick9rc_15000` / `place9rc_15000` (needed `--place_release open`). Old white/pink-plate models for
@@ -99,6 +103,42 @@ best push result): `d2_pointmap_20000`.
 | `find` | `object`: any cube or plate | "find the {object}" |
 
 Training phrasings and held-out phrasings per skill are defined there; `HELDOUT_PAIRS` = (yellow, pink), (green, white).
+
+### Planner (`so101_lang/planner.py`, `scripts/eval_planner.py`, `tests/planner_cases.json`)
+- Reply = goals `{cube_words, cube, on_words, on}`; `cube` / `on` are enums of the scene's objects plus "gripper"
+  (keep holding) and "table" / "unspecified" (so the LLM can say a request is impossible; always refused).
+- Code: ambiguity check (the user's own words, e.g. a bare "the plate" with two plates → refuse), ordering (held
+  cube first, supports before what goes on them, cycles refused), conversion to calls, precondition check
+  (`validate`). An invalid reply is sent back once with the error.
+- Offline test set, 50 instructions (simple, reworded, multi-step, quantifiers, holding a cube, impossible):
+
+  | Model / design | Correct | Time per plan (median / max, GPU) |
+  |---|---|---|
+  | `qwen3-vl:8b` (always reasons), skill calls | 47/50 | 12 s / 121 s |
+  | `qwen3-vl:8b-instruct`, skill calls | 45/50 | 0.4 s / 2.6 s |
+  | **`qwen3-vl:8b-instruct`, goals + code ordering + ambiguity check** | **48/50** | **0.4 s / 1.3 s** |
+
+  Misses: "blue at the bottom, then green, then red on top" built upside down (unstable between runs); "each cube
+  on the plate of its colour" sent red to the pink plate. The prompt was tuned on these 50 instructions, so the
+  number is optimistic. **Held-out set** (`tests/planner_cases_heldout.json`, 50 new instructions written after
+  the tuning, orange / brown plates, never used for tuning): **47/50** (simple 8/8, reworded 10/10, multi 6/8,
+  quantifier 7/8, holding 4/4, impossible 12/12). Misses: "put green on the brown plate and then stack blue on
+  it" refused (bare "it"; letting pronouns through made it stack on the plate instead, so refusal stays);
+  "red at the bottom and blue above it" stacked upside down (same weakness as the tuning set's tower);
+  "every cube on the plate of its own colour" (red / yellow plates) refused. On the CPU a plan takes 5–35 s
+  (median 9 s).
+- Re-planning does not use the skills' verdicts as proof (pick passes 7–10 misses per 50, place verdict 87 %):
+  goals are checked in the scene. Perception check (`--check perception`): `locate9` of each goal's cube and
+  support from home (preset views for objects not plausibly seen), cube within the plate radius and < 3 cm above
+  the plate, or within 2 cm of the base cube and one cube height (± 1.2 / 1.5 cm) above it; an object never seen
+  falls back on the goal's last verdict. Every check is scored against the simulator.
+  - Plate positions come from the fused multi-view find (median 8 mm error): a single locate from home put two
+    different plates at the same wrong spot, and a cube on a plate pulls the plate's detection away. Cubes are
+    located live at each check (a cube on a plate is seen 1–2 cm low: plate pixels in its depth), so the window
+    is cube centre within the plate radius and 2.5 cm below to 3.2 cm above the plate point.
+  - Check accuracy on 8 debug episodes (two plates, objects seen): 88 % (single-view plates) → 98 % (fused
+    plates); every error was a false "not met", which made the executor pick up a correctly placed cube and
+    re-place it (once 11 cm off the plate).
 
 ### Pass/fail verdict
 - `[done, success]` per action (`data/status.py`): running `[0,0]`, succeeded `[1,1]` (last 5 frames of a
@@ -168,6 +208,14 @@ setsid nohup scripts/eval.sh still push > logs/eval.log 2>&1 < /dev/null &
 ~/lerobot-env/bin/python -m so101_lang.serve.policy_server
 OMNI_KIT_ACCEPT_EULA=YES ~/isaacsim/bin/python scripts/eval_policy.py --episodes 150 --seed 0
 ```
+
+**Interactive demo** (`scripts/demo.sh`; needs `ollama serve`): `eval_policy.py --interactive --replan --check
+perception --viz kit` with the arm's wrist mount removed (`SO101_NO_CAMERA_MOUNT=1`) and a visual model of the
+stereo head on a post (`SO101_SHOW_HEAD=1`, `stereo_head_rig_cfgs()`; behind the optical centres and inside the
+5 cm near clip, so the stereo images are unchanged). Each round: new random scene; instruction from the
+"SO-101 demo" panel (`demo_ui.py`) or the terminal; the LLM plans in a thread while the app keeps rendering; the
+panel shows the left camera with the perceived targets, the plan with each goal's status and attempt, and the
+step running. The viewport camera is free (right mouse + WASD, Alt + left mouse). Videos: `outputs/demo/`.
 
 ---
 
@@ -500,6 +548,29 @@ hand-eye calibration measures where it is. Without it the policies fail (pick 41
 still finds the objects, but the state, targets and point map arrive in a frame the models never saw. The real head
 need not match the training pose exactly; it needs to be calibrated.
 
+### LLM planner + re-planning in the simulator (2026-10-31; 50 seeded episodes per task, same scenes as Exp. 4)
+`scripts/run_replan_eval.sh`, `outputs/replan/`. Skills `*9rc2`, `find9rc`, `stack9_place300_5000`; at most 3
+attempts per goal. Baseline: the oracle sequence run once, no re-planning (Exp. 4 scenes, `outputs/exp3`).
+
+| Task | Oracle, no re-planning | **LLM plan + re-planning, perception checks** | Oracle + re-planning, truth checks |
+|---|---|---|---|
+| two plates (`pairs`) | 43/50 | **44/50** (goals 94/100, 116 skill runs) | 47/50 (97/100, 110 runs) |
+| plate, then stack (`plate_stack`) | 21/50 | **20/50** (65/100, 162 runs) | 31/50 (78/100, 146 runs) |
+| tower | 8/50 | stopped (stacking set aside) | stopped |
+
+- The LLM plan was right in 100/100 episodes (CPU, median 14 s, max 33 s per plan).
+- Perception goal checks: 97 % right on `pairs` (332 checks, 24 with an object unseen), 94 % on `plate_stack`
+  (424, 59 unseen); the errors are mostly false "not met" (8 and 19), which cost a re-run of a met goal.
+- Re-planning recovers failed pick-and-place steps; it cannot fix the stack skill: in 22 of 50 `plate_stack`
+  LLM episodes the stack goal failed all 3 attempts. Stack verdict accuracy 44-47 % (about half its passes are
+  false), so checking goals in the scene rather than trusting verdicts is what makes the retries work at all.
+- With truth checks `plate_stack` gains 10 episodes over the baseline, with perception checks none: the perception
+  checks at the stack height (unseen cubes, false "not met") waste the retries the stack skill needs.
+- The first `tower` run crashed: SAM2's video session kept every frame and its outputs on the GPU (~22 MB per
+  frame), and a long tower sub-task with three cubes ran the server out of memory. The session now keeps them on
+  the CPU (`sam2_tracker.py`; identical masks, GPU growth 2.2 GB → 0.19 GB per 100 frames). Tower runs were then
+  stopped to concentrate on plain pick-and-place.
+
 ## 8. Not done yet / next steps
 Best system (defaults: `*9rc2`, grasp check + retry, release gate): stationary 91 / 91 %, push 87 / 87 %.
 Granularity study (experiments 1-4) complete; paper draft in `paper/` (authors and reference checks open).
@@ -514,13 +585,16 @@ Granularity study (experiments 1-4) complete; paper draft in `paper/` (authors a
    and talks to a small host on the Pi over wired Ethernet (ZeroMQ, as LeRobot's LeKiwi). Real images must be
    rectified to the training intrinsics (512 x 512, fx 781.87 px, 60 mm baseline).
 4. Re-aiming during the descent after late pushes (retries cover it today); find failures (blue cube not proposed).
-5. LLM planner (Ollama `qwen3-vl:8b`, implemented and tested offline on composed instructions) in the loop.
+5. LLM planner + re-planning: done for pick-and-place (results above). Interactive demo: `scripts/demo.sh`.
+   Stacking (towers, cube on a plated cube) set aside for now.
 
 ## 9. File map
 ```
 so101_lang/
   language.py                  object vocabulary, plate palette, skill registry, skills_schema(), templates
+  planner.py                   planner LLM (goals -> ordered, validated skill calls), next_goal() re-planning
   sim_app.py                   Isaac Lab launch helpers (isaacsim env)
+  demo_ui.py                   demo window in Kit: robot view with perceived targets, plan, current step
   envs/                        task config, MDP terms (plate colours), stereo head calibration (head.py)
   expert/pick_place_sm.py      scripted demonstrator (+ DART noise)
   robots/frames.py, so101.py   rigid-transform maths; SO101Adapter
@@ -534,11 +608,14 @@ scripts/
   run_stage_randcolor.sh       data generation → conversion → targets → per-skill datasets → training
   run_stage_skills.sh          train skill models (used by the stage driver)
   eval.sh                      server + seeded evaluation runs (still / push)
+  eval_planner.py              planner LLM on tests/planner_cases.json (no simulator)
+  run_replan_eval.sh           LLM planner + re-planning on the composed tasks
+  demo.sh                      interactive demo: type an instruction, watch it in the Isaac Sim window
   run_eval_randcolor2.sh       the 2026-10-09 comparison (new vs old models, retry vs fused find)
   eval_policy.py               closed-loop evaluation;  gen_demos / gen_fail_demos / gen_find_demos.py: recorders
   *.py                         diagnostics and benchmarks (depth, detection, SAM2, latency, sensitivity)
 train/                         training launchers
-tests/                         frame-maths tests
+tests/                         frame-maths tests, planner instruction set
 hardware/                      prints/ (all STLs), so101_gripper/ (sim gripper source files), stereo_head/
                                (parametric stereo plate), objects/ (cube + plate generator), calibration/
                                (ChArUco boards, hand-eye jaw clamp + board plate)

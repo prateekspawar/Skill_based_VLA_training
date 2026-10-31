@@ -234,7 +234,10 @@ class Sam2PointTracker:
         self.queries = list(queries)
         self.points, self.area0, self.pending, self.base, self.ref = {}, {}, {}, {}, {}
         self.state, self.anchor, self.recent, self.departs = {}, {}, {}, {}
-        self.session = self.processor.init_video_session(inference_device=self.device, dtype=torch.float32)
+        # Frame history and per-frame outputs on the CPU: on the GPU they grew ~22 MB per frame and a long tower
+        # sub-task ran the server out of memory; masks are identical (docs/NOTES.md).
+        self.session = self.processor.init_video_session(inference_device=self.device, inference_state_device="cpu",
+                                                         video_storage_device="cpu", dtype=torch.float32)
         boxes, scores = [], {}
         for q in self.queries:
             box, score = self.locator.detect(left, q, self.locator.depth.depth(left, right), robot_points,

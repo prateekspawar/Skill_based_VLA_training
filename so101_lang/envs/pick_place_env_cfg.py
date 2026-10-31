@@ -141,6 +141,40 @@ def _stereo_cam_cfg(name: str, pos) -> CameraCfg:
     )
 
 
+def stereo_head_rig_cfgs() -> dict[str, AssetBaseCfg]:
+    """Visual model of the stereo head for demos (SO101_SHOW_HEAD=1): a plate with two camera boards and lenses on a
+    ball head and a post standing on the table, like the printed stereo plate in hardware/prints. Visual only (no
+    collision). Every part lies behind the optical centres and within the cameras' 5 cm near clip, and the post stands
+    behind and below their field of view, so the stereo images are unchanged (checked pixel for pixel)."""
+    _, _, quat, head = rendered_head_pose()
+    R, c = head[:3, :3], head[:3, 3]
+    at = lambda p: tuple((R @ np.asarray(p, dtype=float) + c).tolist())  # head-frame point -> env frame
+    look = lambda rgb, metal=0.0: sim_utils.PreviewSurfaceCfg(diffuse_color=rgb, metallic=metal, roughness=0.5)
+    half = STEREO_BASELINE / 2
+    parts = {
+        "plate": (sim_utils.CuboidCfg(size=(0.006, 0.10, 0.032), visual_material=look((0.12, 0.12, 0.13))),
+                  at((-0.016, 0, 0)), quat),
+    }
+    for side, y in (("l", half), ("r", -half)):
+        parts[f"board_{side}"] = (sim_utils.CuboidCfg(size=(0.002, 0.025, 0.024), visual_material=look((0.05, 0.35, 0.12))),
+                                  at((-0.012, y, 0)), quat)
+        parts[f"holder_{side}"] = (sim_utils.CuboidCfg(size=(0.006, 0.013, 0.013), visual_material=look((0.03, 0.03, 0.03))),
+                                   at((-0.008, y, 0)), quat)
+        parts[f"lens_{side}"] = (sim_utils.CylinderCfg(radius=0.0045, height=0.005, axis="X",
+                                                       visual_material=look((0.02, 0.02, 0.05), 0.6)),
+                                 at((-0.003, y, 0)), quat)
+    ball = at((-0.032, 0, 0))
+    parts["ball"] = (sim_utils.SphereCfg(radius=0.012, visual_material=look((0.2, 0.2, 0.2), 0.8)), ball, quat)
+    post_h = ball[2] - 0.01
+    parts["post"] = (sim_utils.CylinderCfg(radius=0.008, height=post_h, axis="Z", visual_material=look((0.6, 0.6, 0.62), 0.9)),
+                     (ball[0], ball[1], post_h / 2), (0.0, 0.0, 0.0, 1.0))
+    parts["foot"] = (sim_utils.CylinderCfg(radius=0.05, height=0.008, axis="Z", visual_material=look((0.1, 0.1, 0.1))),
+                     (ball[0], ball[1], 0.004), (0.0, 0.0, 0.0, 1.0))
+    return {f"head_rig_{k}": AssetBaseCfg(prim_path=f"{{ENV_REGEX_NS}}/HeadRig/{k}", spawn=spawn,
+                                          init_state=AssetBaseCfg.InitialStateCfg(pos=pos, rot=rot))
+            for k, (spawn, pos, rot) in parts.items()}
+
+
 def stereo_intrinsics() -> dict:
     """Pinhole intrinsics shared by both cameras (square pixels, principal point at the centre)."""
     f_px = STEREO_FOCAL_LENGTH / STEREO_APERTURE * CAMERA_RES
@@ -313,6 +347,9 @@ class SO101PickPlaceIkEnvCfg(stack_ik_abs_env_cfg.SO101CubeStackEnvCfg):
             self.scene.robot.spawn = self.scene.robot.spawn.replace(
                 variants={**self.scene.robot.spawn.variants, "Sensor": "none"})
         self.scene.table.spawn.semantic_tags = [("class", "table")]
+        if os.environ.get("SO101_SHOW_HEAD", "0") == "1":  # demo: show the stereo head and its post
+            for name, cfg in stereo_head_rig_cfgs().items():
+                setattr(self.scene, name, cfg)
 
         self.events = EventsCfg()
         self.observations = ObservationsCfg()

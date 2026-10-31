@@ -13,6 +13,7 @@ Older combined pick+place model (13-D state): --checkpoint d2_... on the server,
 
 import argparse
 import os
+import sys
 
 from so101_lang import sim_app
 
@@ -53,9 +54,22 @@ parser.add_argument("--compose", choices=["none", "pairs", "plate_stack", "tower
                          "Each sub-task runs find -> pick -> place/stack; success is checked on the final scene.")
 parser.add_argument("--planner", choices=["oracle", "llm"], default="oracle",
                     help="Composed tasks: the sub-task sequence from the instruction's template (oracle) or from the "
-                         "planner LLM (Ollama, --planner_model) given language.skills_schema() and the scene's objects.")
-parser.add_argument("--planner_model", default="qwen3-vl:8b")
+                         "planner LLM (so101_lang/planner.py: Ollama --planner_model, goals -> ordered skill calls).")
+parser.add_argument("--planner_model", default=os.environ.get("SO101_PLANNER_MODEL", "qwen3-vl:8b-instruct"))
+parser.add_argument("--planner_cpu", action="store_true", help="Run the planner LLM on the CPU (GPU memory is short).")
+parser.add_argument("--replan", action="store_true",
+                    help="Composed tasks: after every sub-task, open the gripper, go home, check every goal (--check) and "
+                         "run the next unmet goal whose support is in place (planner.next_goal), until all goals are met "
+                         "or a goal has failed 1 + --replan_retries times. The LLM is not asked again.")
+parser.add_argument("--replan_retries", type=int, default=2, help="Extra attempts per goal with --replan.")
+parser.add_argument("--check", choices=["truth", "perception"], default="perception",
+                    help="--replan goal check: simulator truth, or perception (locate9 from home, then the preset views for "
+                         "objects not plausibly seen; an object never seen falls back on the goal's last verdict). Every "
+                         "perception check is scored against the simulator.")
 parser.add_argument("--ollama_url", default="http://localhost:11434")
+parser.add_argument("--interactive", action="store_true",
+                    help="Demo: each episode shows a new scene, reads an instruction from the terminal, plans it with the "
+                         "LLM and runs it (implies --planner llm; use with --replan and --viz kit, see scripts/demo.sh).")
 parser.add_argument("--only_tasks", default=os.environ.get("SO101_ONLY_TASKS", ""),
                     help="Run only episodes whose task is in this list, e.g. 'blue cube:blue plate;red cube:yellow plate' "
                          "(the others are skipped and not counted; the seeded scene sequence stays the same).")
@@ -113,11 +127,14 @@ parser.add_argument("--video_episodes", default="",
                     help="Comma-separated extra episodes to record (<video_out stem>_ep<N>.mp4) and trace per pick query "
                          "(time, gripper-cube distance, target error, gripper command).")
 args, env_cfg = sim_app.parse(parser, TASK)
+if args.interactive:
+    args.compose, args.planner = "interactive", "llm"
 DEBUG_EPS = {int(e) for e in args.video_episodes.split(",") if e.strip()}
-VIDEO_EPS = DEBUG_EPS | {args.video_episode}
+VIDEO_EPS = DEBUG_EPS | ({args.video_episode} if not args.interactive else set(range(args.episodes)))
 env_cfg.scene.num_envs = 1
 env_cfg.episode_length_s = args.episode_length_s or (2 * args.step_timeout + 2 + (120 if args.pipeline == "find" else 0)
-                                                     + (400 if args.compose != "none" else 0))
+                                                     + (400 if args.compose != "none" else 0)
+                                                     + (1000 if args.replan else 0))
 SUCCESS_FUNC = env_cfg.terminations.success.func
 if args.verdict:
     # Place must run until the model reports, so the success term never terminates; it stays registered so the
@@ -153,6 +170,8 @@ with sim_app.launch(env_cfg, args):
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     env_cfg.seed = args.seed
+    if args.interactive:  # viewport: the whole setup (arm, stereo head on its post, workspace) from the front-left
+        env_cfg.viewer.eye, env_cfg.viewer.lookat = (0.78, 0.72, 0.68), (0.0, 0.04, 0.18)
     env = sim_app.make_env(TASK, env_cfg)
     _env_step, time_out_resets = env.step, [0]
 
@@ -160,15 +179,23 @@ with sim_app.launch(env_cfg, args):
         """env.step that counts simulator time-out resets (they re-randomise the scene mid-episode)."""
         out = _env_step(action)
         time_out_resets[0] += int(bool(env.reset_time_outs[0]))
+        if ui_demo is not None:
+            ui_demo.on_step(lambda: rgb("left_cam"))
         return out
 
     env.step = _step_counting_time_outs
+    ui_demo = None  # demo window (--interactive with --viz kit): robot view, plan, current step
+    if args.interactive and "kit" in (getattr(args, "visualizer", None) or []):
+        from so101_lang.demo_ui import DemoUI
+        from so101_lang.envs.pick_place_env_cfg import STEREO_BASELINE, stereo_intrinsics
+
+        ui_demo = DemoUI(stereo_intrinsics(), STEREO_BASELINE)
     robot = env.scene["robot"]
     gi = robot.find_bodies("gripper")[0][0]
     adapter = SO101Adapter()
     conn = Client(("localhost", args.port), authkey=b"so101_lang")
     max_steps = int(args.step_timeout / env.step_dt)
-    verdicts = {"pick": [], "place": [], "find": []}  # (verdict: True / False / "timeout", truth: bool)
+    verdicts = {"pick": [], "place": [], "stack": [], "find": []}  # (verdict: True / False / "timeout", truth: bool)
 
     def on_plate():
         if args.compose != "none":  # mixed place / stack sub-tasks: geometric check of the current sub-task
@@ -189,32 +216,13 @@ with sim_app.launch(env_cfg, args):
 
     compose_results = []
 
-    def llm_plan(instruction, objects):
-        """Skill calls for the instruction from the planner LLM (Ollama chat API, JSON output, CPU)."""
-        import json as _json
-        import urllib.request
+    planner = None
+    if args.planner == "llm":
+        from so101_lang.planner import ARG, Planner, next_goal
 
-        system = ("You are the task planner of a one-arm robot. Turn the user's instruction into a sequence of skill "
-                  "calls. Use only these skills (JSON schema):\n" + language.skills_schema() + "\nObjects in the scene: "
-                  + ", ".join(objects) + ". The gripper holds one cube at a time: every pick is followed by a place "
-                  "or a stack of that cube. Reply only with JSON: {\"calls\": [{\"skill\": name, \"args\": {param: value}}]}.\n"
-                  # Two single-step examples (not the evaluated compositions): they shorten the model's reasoning,
-                  # which otherwise ran past the token budget on the plate-then-stack instruction.
-                  "Examples:\nput the green cube on the white plate -> {\"calls\": [{\"skill\": \"pick\", \"args\": "
-                  "{\"object\": \"green cube\"}}, {\"skill\": \"place\", \"args\": {\"target\": \"white plate\"}}]}\n"
-                  "stack the yellow cube on the red cube -> {\"calls\": [{\"skill\": \"pick\", \"args\": {\"object\": "
-                  "\"yellow cube\"}}, {\"skill\": \"stack\", \"args\": {\"object\": \"red cube\"}}]}")
-        # qwen3-vl reasons before answering whatever "think" says, so the token budget must cover the reasoning
-        # (CPU: ~7 tokens/s; the server runs on the CPU so it does not compete with the policy for GPU memory).
-        # No "format": "json": with it the reasoning model's answer comes back empty; the JSON is cut out instead.
-        body = {"model": args.planner_model, "stream": False,
-                "options": {"temperature": 0, "num_gpu": 0, "num_predict": 8000},
-                "messages": [{"role": "system", "content": system}, {"role": "user", "content": instruction}]}
-        req = urllib.request.Request(args.ollama_url + "/api/chat", data=_json.dumps(body).encode(),
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=3000) as r:
-            content = _json.loads(r.read())["message"]["content"]
-        return _json.loads(content[content.index("{"): content.rindex("}") + 1]).get("calls", []), content
+        planner = Planner(args.planner_model, args.ollama_url, gpu=not args.planner_cpu)
+    elif args.replan:
+        from so101_lang.planner import next_goal
 
     def calls_to_subtasks(calls):
         """[pick X, place/stack T, ...] -> [(cube, target, stack)]; find calls are implied by the executor."""
@@ -238,6 +246,8 @@ with sim_app.launch(env_cfg, args):
         if args.compose == "none":
             cube, plate = env.pp_task[0].tolist()
             return [(cube, plate, DEFAULT_STACK)], None, None
+        if args.interactive:
+            return interactive_subtasks(ep)
         rng = np.random.default_rng(args.seed * 7777 + ep)
         X, Y, Z = (int(i) for i in rng.permutation(language.NUM_CUBES)[:3])
         A, B = (int(j) for j in rng.permutation(language.NUM_PLATES))
@@ -251,14 +261,60 @@ with sim_app.launch(env_cfg, args):
                              [(Y, X, True), (Z, Y, True)])
         if args.planner == "oracle":
             return oracle, instr, {"planner": "oracle", "plan_ok": True}
-        objects = [c(i) for i in range(language.NUM_CUBES)] + [p(j) for j in range(language.NUM_PLATES)]
         try:
-            calls, raw = llm_plan(instr, objects)
-            sub = calls_to_subtasks(calls)
-        except Exception as e:  # unreachable server, malformed JSON
-            sub, raw = None, f"error: {e}"
-        return (sub or []), instr, {"planner": args.planner_model, "plan_ok": sub == oracle, "valid": sub is not None,
-                                    "raw": raw[:400]}
+            plan = planner.plan(instr, [c(i) for i in range(language.NUM_CUBES)],
+                                [p(j) for j in range(language.NUM_PLATES)])
+            sub = calls_to_subtasks([{"skill": sk, "args": {ARG[sk]: arg}} for sk, arg in plan.calls]) if plan.ok else None
+            raw, secs = (plan.error or "") + " | " + " / ".join(plan.raw), plan.seconds
+        except Exception as e:  # unreachable server
+            sub, raw, secs = None, f"error: {e}", None
+        # Two plates: either order is right. Stacks: the support's goal must come first.
+        right = sub is not None and (sorted(sub) == sorted(oracle) if args.compose == "pairs" else sub == oracle)
+        return (sub or []), instr, {"planner": args.planner_model, "plan_ok": right, "valid": sub is not None,
+                                    "raw": raw[:400], "plan_s": secs}
+
+    def say(msg, end="\n"):
+        """Demo output to the terminal (the simulator's own log usually goes to a file) and to the log."""
+        try:
+            with open("/dev/tty", "w") as tty:
+                tty.write(msg + end)
+        except OSError:
+            pass
+        print(msg, flush=True)
+
+    def interactive_subtasks(ep):
+        """Read an instruction for the current scene and plan it. None = quit, [] with no instruction = new scene."""
+        cubes = [language.cube_ref(i) for i in range(language.NUM_CUBES)]
+        plates = [language.plate_ref(j, plate_colors()) for j in range(language.NUM_PLATES)]
+        say(f"\n[demo] scene {ep}: {', '.join(cubes)}; {', '.join(plates)}")
+        say("[demo] instruction (empty = new scene, q = quit) > ", end="")
+        if ui_demo is not None:  # window or terminal; the app keeps rendering while waiting
+            instr = ui_demo.wait_instruction(env.sim.render, f"Scene: {', '.join(cubes)}; {', '.join(plates)}",
+                                             rgb("left_cam"))
+            say(instr)
+        else:
+            line = sys.stdin.readline()
+            instr = line.strip() if line else "q"
+        if instr.lower() in ("q", "quit", "exit"):
+            return None, None, None
+        if not instr:
+            return [], None, None
+        if ui_demo is not None:
+            ui_demo.instruction = instr
+            plan = ui_demo.run_rendering(lambda: planner.plan(instr, cubes, plates), env.sim.render,
+                                         "planning with the LLM (CPU, 5-30 s)")
+        else:
+            plan = planner.plan(instr, cubes, plates)
+        sub = calls_to_subtasks([{"skill": sk, "args": {ARG[sk]: arg}} for sk, arg in plan.calls]) if plan.ok else None
+        if sub is None:
+            say(f"[demo] not doing it: {plan.error or 'the plan is not executable'} ({plan.seconds:.1f} s)")
+        else:
+            say(f"[demo] plan ({plan.seconds:.1f} s): " + "; ".join(f"{sk} {arg}" for sk, arg in plan.calls) + " ... running")
+        if ui_demo is not None:
+            ui_demo.set_plan(instr, [f"{cubes[c_]} on {cubes[t_] if s_ else plates[t_]}" for c_, t_, s_ in sub or []],
+                             plan.seconds, plan.error or "the plan is not executable")
+        return (sub or []), instr, {"planner": args.planner_model, "plan_ok": sub is not None, "valid": sub is not None,
+                                    "raw": (plan.error or "")[:400], "plan_s": plan.seconds}
 
     def compose_report(ep, instruction, plan_info, subtasks):
         ok = [object_on_target(cu, tg, st) for cu, tg, st in subtasks]
@@ -269,8 +325,126 @@ with sim_app.launch(env_cfg, args):
               f"{sum(ok)}/{len(subtasks)} (final scene) | plan {'ok' if res['plan_ok'] else 'WRONG'}"
               + ("" if res["valid"] else " (invalid)")
               + f" | scene plates: {', '.join(language.plate_ref(j, plate_colors()) for j in range(language.NUM_PLATES))}"
-              + (f" | planner: {plan_info['raw']!r}" if not res["plan_ok"] else ""),
+              + (f" | planner: {plan_info['raw']!r}" if not res["plan_ok"] else "")
+              + (f" | plan {plan_info['plan_s']:.1f}s" if plan_info.get("plan_s") is not None else "")
+              + (f" | replan: {rp['runs']} sub-task runs, stop: {rp['stop'] or 'all goals met'}, checks wrong "
+                 f"{sum(m != t for m, t, _ in rp['checks'])}/{len(rp['checks'])}" if (rp := plan_info.get("replan")) else ""),
               flush=True)
+        if plan_info.get("replan"):
+            res.update(runs=plan_info["replan"]["runs"], stop=plan_info["replan"]["stop"])
+
+    def obj_query(name):
+        i = int(name.split("_")[1])
+        return language.cube_ref(i) if name.startswith("cube") else language.plate_ref(i, plate_colors())
+
+    plate_seen = {}  # plate positions from the fused find (base frame); a single view from home misplaces plates
+
+    def perceive_scene(names, head_b):
+        """Base-frame positions of the named objects from perception (locate9): from home first, then from the preset
+        views for those not plausibly seen; objects never seen are missing. Ends at home. Plates do not move: once a
+        fused find has located a plate (multi-view, before anything is put on it), that position is used."""
+        seen, moved = {n: plate_seen[n] for n in names if n in plate_seen}, False
+        hb = head_b[0].cpu().numpy()
+        for v in [None] + list(VIEW_POSES):
+            todo = [n for n in names if n not in seen]
+            if not todo:
+                break
+            if v is not None:
+                go_to_view(VIEW_POSES[v], head_b)
+                moved = True
+            for n in todo:
+                conn.send({"cmd": "locate9", "left": rgb("left_cam"), "right": rgb("right_cam"), "query": obj_query(n),
+                           "robot_points": robot_points_head(head_b)})
+                reply = conn.recv()
+                if reply.get("detect", {}).get("plausible", True) is not False:
+                    seen[n] = hb[:3, :3] @ np.asarray(reply["pose9"][:3]) + hb[:3, 3]
+        if moved:
+            go_home(ep_home, head_b)
+        return seen
+
+    def perceived_on(c, s, stack):
+        """Perceived cube centre `c` resting on support `s` (base frame), looser than the simulator check (stereo
+        error); None if either was not seen."""
+        if c is None or s is None:
+            return None
+        dxy, dz = float(np.linalg.norm(c[:2] - s[:2])), float(c[2] - s[2])
+        if stack:
+            return dxy < 0.02 and CUBE_SIZE - 0.012 < dz < CUBE_SIZE + 0.015
+        # A cube on a plate is seen 1-2 cm low (plate pixels in its depth); one on another cube would be ~4.5 cm up.
+        return dxy < PLATE_RADIUS and -0.025 < dz < 0.032  # centre inside the rim: resting on the plate
+
+    def release_and_home(head_b):
+        """After a sub-task: open the gripper where it is (drops whatever it holds), then go home."""
+        if ui_demo is not None:
+            ui_demo.set_phase("opening the gripper, going home")
+        open_cmd = state_now(head_b)[0].clone()
+        open_cmd[9] = 1.0
+        for _ in range(10):
+            env.step(adapter.ik_command(open_cmd.unsqueeze(0), head_b))
+        go_home(ep_home, head_b)
+
+    check_log = []  # (perceived met, true met, object not seen) per perception goal check
+
+    def goal_sequence(goals, head_b, info):
+        """Sub-tasks (cube, target, stack) to run. Without --replan: the plan as it is. With --replan: check every
+        goal before each sub-task and run the next unmet goal whose support is in place (planner.next_goal)."""
+        if not args.replan:
+            yield from goals
+            return
+        global ep_home
+        if ep_home is None:  # the arm's start pose (perception checks and recoveries return there)
+            ep_home = math_utils.subtract_frame_transforms(
+                robot.data.root_pos_w.torch, robot.data.root_quat_w.torch,
+                robot.data.body_pos_w.torch[:, gi], robot.data.body_quat_w.torch[:, gi])
+        plate_seen.clear()
+        keys = [(f"cube_{c_}", f"cube_{t_}" if s_ else f"plate_{t_}") for c_, t_, s_ in goals]
+        tries, last_verdict = [0] * len(goals), [False] * len(goals)
+        info.update(runs=0, checks=[], stop="no goals")
+        while goals:
+            if time_out_resets[0] > ep_time_outs0:
+                info["stop"] = "simulator time-out (new layout)"
+                return
+            truth = [object_on_target(*g) for g in goals]
+            if ui_demo is not None:
+                ui_demo.set_phase("checking the goals in the scene")
+            if args.check == "truth":
+                met = truth
+            else:
+                seen = perceive_scene(sorted({n for k in keys for n in k}), head_b)
+                if ui_demo is not None:
+                    hb_ = head_b[0].cpu().numpy()
+                    ui_demo.set_targets({obj_query(n): (hb_[:3, :3].T @ (np.asarray(p_) - hb_[:3, 3]), "seen",
+                                                        PLATE_RADIUS if "plate" in n else CUBE_SIZE / 2)
+                                         for n, p_ in seen.items() if p_ is not None}, replace=True)
+                met = []
+                for i, (g, (cn, sn), tr) in enumerate(zip(goals, keys, truth)):
+                    m = perceived_on(seen.get(cn), seen.get(sn), g[2])
+                    unseen = m is None
+                    m = last_verdict[i] if unseen else m  # not seen: trust the last run's own verdict
+                    met.append(m)
+                    if m != tr:  # wrong check: perceived vs true positions (base frame, mm)
+                        tb = {n: math_utils.subtract_frame_transforms(
+                            robot.data.root_pos_w.torch, robot.data.root_quat_w.torch,
+                            env.scene[n].data.root_pos_w.torch)[0][0].cpu().numpy() for n in (cn, sn)}
+                        fmt = lambda v: "unseen" if v is None else "(" + ", ".join(f"{1000 * x:.0f}" for x in v) + ")"
+                        print(f"[check] ep {ep} goal {obj_query(cn)} on {obj_query(sn)}: perceived {m}, true {tr}"
+                              f"{' (unseen, verdict)' if unseen else ''} | {cn} seen {fmt(seen.get(cn))} true "
+                              f"{fmt(tb[cn])} | {sn} seen {fmt(seen.get(sn))} true {fmt(tb[sn])}", flush=True)
+                    info["checks"].append((m, tr, unseen))
+                    check_log.append((m, tr, unseen))
+            i, info["stop"] = next_goal(keys, met, tries, 1 + args.replan_retries)
+            if ui_demo is not None:
+                ui_demo.set_goal_status(met=met)
+            if i is None:
+                return
+            tries[i] += 1
+            if ui_demo is not None:
+                ui_demo.set_goal_status(running=i, attempt=tries[i], tries=1 + args.replan_retries)
+            info["runs"] += 1
+            yield goals[i]
+            v = results[-1].get("place_verdict") if results else None
+            last_verdict[i] = bool(v and v[0] is True)
+            release_and_home(head_b)
 
     class Verdict:
         """Debounced [done, success] reading from the executed actions."""
@@ -419,6 +593,9 @@ with sim_app.launch(env_cfg, args):
                 ep_track[sk].append((cmd, track_err[-1][1], reply["info"].get(q, {}).get("status", "static")))
             st = reply["info"].get(q, {}).get("status", "static")  # "static": fixed position, no tracker
             track_status[st] = track_status.get(st, 0) + 1
+        if ui_demo is not None:
+            ui_demo.set_targets({q: (out[sk][:3], sk, CUBE_SIZE / 2 if sk == "pick" or MODE["stack"] else PLATE_RADIUS)
+                                 for sk, q in queries.items()})
         return out
 
     def truth_pose9(name, head_b):
@@ -473,6 +650,8 @@ with sim_app.launch(env_cfg, args):
         """Run the find model until it reports (or holds still / 6 s), then get the object's 9-D pose from this view
         and (SAM2 targets) start tracking it here. Returns (pose9, ok, points); ok = the model did not report failure."""
         t, cmds = 0, []
+        if ui_demo is not None:
+            ui_demo.set_phase(f"find: looking for the {query}")
         vd = Verdict(always=True)  # find always ends on its own verdict when the model has one
         if use_model:
             conn.send({"cmd": "reset", "seed": seed, "skill": "find"})
@@ -635,8 +814,15 @@ with sim_app.launch(env_cfg, args):
         # One hold step so the cameras show the new layout (first post-reset render is stale).
         env.step(adapter.ik_command(state_now(head_b), head_b))
         subtasks, instruction, plan_info = make_subtasks(ep, head_b)
+        if args.interactive and subtasks is None:
+            break
+        if args.interactive and not subtasks:
+            continue  # new scene, or nothing executable
         stop_all, ep_home = False, None
-        for sub_i, (sub_cube, sub_target, sub_stack) in enumerate(subtasks):
+        if plan_info is not None:
+            plan_info["replan"] = {} if args.replan else None
+        for sub_i, (sub_cube, sub_target, sub_stack) in enumerate(
+                goal_sequence(subtasks, head_b, plan_info["replan"] if plan_info and args.replan else {})):
             MODE["stack"] = env.pp_stack = sub_stack
             env.pp_task[0, 0], env.pp_task[0, 1] = sub_cube, sub_target
             cube, plate = env.pp_task[0].tolist()
@@ -758,6 +944,14 @@ with sim_app.launch(env_cfg, args):
                             tracked.append(query)
                 if not find_failed:
                     rot6d = {sk: v[3:] for sk, v in poses.items()}
+                    if ui_demo is not None:
+                        ui_demo.set_targets({language.cube_ref(cube): (poses["pick"][:3], "pick", CUBE_SIZE / 2),
+                                             second_query(plate): (poses["place"][:3], "place",
+                                                                   CUBE_SIZE / 2 if MODE["stack"] else PLATE_RADIUS)},
+                                            replace=True)
+                    if not MODE["stack"] and args.find_views == "fused":
+                        hb_ = head_b[0].cpu().numpy()
+                        plate_seen[f"plate_{plate}"] = hb_[:3, :3] @ np.asarray(poses["place"][:3]) + hb_[:3, 3]
                     if args.target != "sam2":
                         perceived = {sk: v[:3] for sk, v in poses.items()}
             elif args.target_dim == 9:
@@ -792,6 +986,8 @@ with sim_app.launch(env_cfg, args):
             while skill_i + 1 < len(steps):
                 skill_i += 1
                 skill, text = steps[skill_i]
+                if ui_demo is not None:
+                    ui_demo.set_phase(f"{'stack' if MODE['stack'] and skill == 'place' else skill}: {text}")
                 conn.send({"cmd": "reset", "seed": args.seed * 100000 + ep * 10 + skill_i,
                            "skill": "stack" if MODE["stack"] and skill == "place" else skill})
                 conn.recv()
@@ -938,8 +1134,9 @@ with sim_app.launch(env_cfg, args):
                         outcome["pick"] = bool(outcome["pick"] or truth)  # lifted only during the 0.5 s hold
                     if skill == "place":
                         outcome["place"] = truth
-                    verdicts[skill].append((vd.result if vd.result is not None else "timeout", truth))
-                    outcome[f"{skill}_verdict"] = verdicts[skill][-1]
+                    vkey = "stack" if MODE["stack"] and skill == "place" else skill
+                    verdicts[vkey].append((vd.result if vd.result is not None else "timeout", truth))
+                    outcome[f"{skill}_verdict"] = verdicts[vkey][-1]
                     if skill == "pick" and not done and args.pipeline == "find":
                         # Grasp check from proprioception: a gripper closed on nothing has opening ~0, one holding the
                         # cube ~0.10. The pick model reports success after many misses, so this decides, not the verdict.
@@ -1064,6 +1261,12 @@ with sim_app.launch(env_cfg, args):
             break
         if args.compose != "none":
             compose_report(ep, instruction, plan_info, subtasks)
+            if args.interactive:
+                r_ = compose_results[-1]
+                say(f"[demo] {'DONE' if r_['success'] else 'FAILED'}: {r_['done']}/{r_['n']} goals met"
+                    + (f" ({r_['runs']} skill runs, {r_['stop']})" if r_.get("stop") else ""))
+                if ui_demo is not None:
+                    ui_demo.set_result(r_["success"], r_["done"], r_["n"], r_.get("stop"))
         frames_out.clear()
 
     if compose_results:
@@ -1072,7 +1275,18 @@ with sim_app.launch(env_cfg, args):
               f"sub-tasks on target {sum(r['done'] for r in compose_results)}/{sum(r['n'] for r in compose_results)}; "
               f"plans correct {sum(r['plan_ok'] for r in compose_results)}/{nc}, invalid "
               f"{sum(not r['valid'] for r in compose_results)}")
-    n = len(results)
+        if args.replan:
+            from collections import Counter
+            print(f"[eval] replan: sub-task runs {sum(r['runs'] for r in compose_results)} for "
+                  f"{sum(r['n'] for r in compose_results)} goals; stops: "
+                  + ", ".join(f"{k or 'all goals met'} {c}" for k, c in Counter(r["stop"] for r in compose_results).most_common()))
+        if check_log:
+            seen_ = [(m, t) for m, t, u in check_log if not u]
+            print(f"[eval] perception goal checks: {len(check_log)}, object not seen in {len(check_log) - len(seen_)} "
+                  f"(fell back on the verdict); seen: accuracy {sum(m == t for m, t in seen_) / max(len(seen_), 1):.0%} "
+                  f"(met: {sum(m and t for m, t in seen_)} right / {sum(m and not t for m, t in seen_)} wrong, not met: "
+                  f"{sum(not m and not t for m, t in seen_)} right / {sum(not m and t for m, t in seen_)} wrong)")
+    n = max(len(results), 1)  # 1: an interactive session can quit before running anything
     pick = sum(r["pick"] for r in results)
     full = sum(r["place"] for r in results)
     print(f"[eval] pick success {pick}/{n} = {pick / n:.0%}; full pick+place {full}/{n} = {full / n:.0%}; "

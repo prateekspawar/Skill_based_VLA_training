@@ -1,0 +1,817 @@
+{
+ "_doc": "Held-out planner test set: written after the prompt was tuned on planner_cases.json and never used for tuning. Same format; default plates orange + brown.",
+ "default_scene": {
+  "cubes": [
+   "red cube",
+   "green cube",
+   "blue cube",
+   "yellow cube"
+  ],
+  "plates": [
+   "orange plate",
+   "brown plate"
+  ]
+ },
+ "cases": [
+  {
+   "cat": "simple",
+   "instruction": "put the green cube on the orange plate",
+   "expect": [
+    [
+     "pick",
+     "green cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ]
+   ]
+  },
+  {
+   "cat": "simple",
+   "instruction": "place the red cube on the brown plate",
+   "expect": [
+    [
+     "pick",
+     "red cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ]
+   ]
+  },
+  {
+   "cat": "simple",
+   "instruction": "stack the yellow cube on the blue cube",
+   "expect": [
+    [
+     "pick",
+     "yellow cube"
+    ],
+    [
+     "stack",
+     "blue cube"
+    ]
+   ]
+  },
+  {
+   "cat": "simple",
+   "instruction": "put the blue cube onto the orange plate",
+   "expect": [
+    [
+     "pick",
+     "blue cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ]
+   ]
+  },
+  {
+   "cat": "simple",
+   "instruction": "lift the green cube",
+   "expect": [
+    [
+     "pick",
+     "green cube"
+    ]
+   ]
+  },
+  {
+   "cat": "simple",
+   "instruction": "move the yellow cube onto the brown plate",
+   "expect": [
+    [
+     "pick",
+     "yellow cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ]
+   ]
+  },
+  {
+   "cat": "simple",
+   "instruction": "put the red cube on the white plate",
+   "expect": [
+    [
+     "pick",
+     "red cube"
+    ],
+    [
+     "place",
+     "white plate"
+    ]
+   ],
+   "scene": {
+    "plates": [
+     "white plate",
+     "purple plate"
+    ]
+   }
+  },
+  {
+   "cat": "simple",
+   "instruction": "stack the green cube on the red cube",
+   "expect": [
+    [
+     "pick",
+     "green cube"
+    ],
+    [
+     "stack",
+     "red cube"
+    ]
+   ]
+  },
+  {
+   "cat": "paraphrase",
+   "instruction": "take the yellow block and leave it on the orange tray",
+   "expect": [
+    [
+     "pick",
+     "yellow cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ]
+   ]
+  },
+  {
+   "cat": "paraphrase",
+   "instruction": "would you mind moving the blue cube over to the brown plate",
+   "expect": [
+    [
+     "pick",
+     "blue cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ]
+   ]
+  },
+  {
+   "cat": "paraphrase",
+   "instruction": "the red cube should end up on the orange plate",
+   "expect": [
+    [
+     "pick",
+     "red cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ]
+   ]
+  },
+  {
+   "cat": "paraphrase",
+   "instruction": "drop the green brick onto the brown saucer",
+   "expect": [
+    [
+     "pick",
+     "green cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ]
+   ]
+  },
+  {
+   "cat": "paraphrase",
+   "instruction": "set the blue box on top of the yellow box",
+   "expect": [
+    [
+     "pick",
+     "blue cube"
+    ],
+    [
+     "stack",
+     "yellow cube"
+    ]
+   ]
+  },
+  {
+   "cat": "paraphrase",
+   "instruction": "I'd like the red one resting on the brown plate",
+   "expect": [
+    [
+     "pick",
+     "red cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ]
+   ]
+  },
+  {
+   "cat": "paraphrase",
+   "instruction": "put the cube that has the colour of grass on the orange plate",
+   "expect": [
+    [
+     "pick",
+     "green cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ]
+   ]
+  },
+  {
+   "cat": "paraphrase",
+   "instruction": "pile the yellow cube onto the green cube",
+   "expect": [
+    [
+     "pick",
+     "yellow cube"
+    ],
+    [
+     "stack",
+     "green cube"
+    ]
+   ]
+  },
+  {
+   "cat": "paraphrase",
+   "instruction": "put the blue cube on the plate that matches its colour",
+   "expect": [
+    [
+     "pick",
+     "blue cube"
+    ],
+    [
+     "place",
+     "blue plate"
+    ]
+   ],
+   "scene": {
+    "plates": [
+     "blue plate",
+     "orange plate"
+    ]
+   }
+  },
+  {
+   "cat": "paraphrase",
+   "instruction": "the orange plate needs the green cube on it",
+   "expect": [
+    [
+     "pick",
+     "green cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ]
+   ]
+  },
+  {
+   "cat": "multi",
+   "instruction": "put the blue cube on the orange plate and the yellow cube on the brown plate",
+   "expect": [
+    [
+     "pick",
+     "blue cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ],
+    [
+     "pick",
+     "yellow cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ]
+   ]
+  },
+  {
+   "cat": "multi",
+   "instruction": "first stack the red cube on the green cube, then put the blue cube on the brown plate",
+   "expect": [
+    [
+     "pick",
+     "red cube"
+    ],
+    [
+     "stack",
+     "green cube"
+    ],
+    [
+     "pick",
+     "blue cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ]
+   ]
+  },
+  {
+   "cat": "multi",
+   "instruction": "put the yellow cube on the orange plate, then put the red cube on top of the yellow cube",
+   "expect": [
+    [
+     "pick",
+     "yellow cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ],
+    [
+     "pick",
+     "red cube"
+    ],
+    [
+     "stack",
+     "yellow cube"
+    ]
+   ]
+  },
+  {
+   "cat": "multi",
+   "instruction": "put the green cube on the brown plate and then stack the blue cube on it",
+   "expect": [
+    [
+     "pick",
+     "green cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ],
+    [
+     "pick",
+     "blue cube"
+    ],
+    [
+     "stack",
+     "green cube"
+    ]
+   ]
+  },
+  {
+   "cat": "multi",
+   "instruction": "stack green on red, and afterwards put yellow on top of green",
+   "expect": [
+    [
+     "pick",
+     "green cube"
+    ],
+    [
+     "stack",
+     "red cube"
+    ],
+    [
+     "pick",
+     "yellow cube"
+    ],
+    [
+     "stack",
+     "green cube"
+    ]
+   ]
+  },
+  {
+   "cat": "multi",
+   "instruction": "before you put the blue cube on the orange plate, put the red cube on the brown plate",
+   "expect": [
+    [
+     "pick",
+     "red cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ],
+    [
+     "pick",
+     "blue cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ]
+   ]
+  },
+  {
+   "cat": "multi",
+   "instruction": "make a stack with the red cube at the bottom and the blue cube above it",
+   "expect": [
+    [
+     "pick",
+     "blue cube"
+    ],
+    [
+     "stack",
+     "red cube"
+    ]
+   ]
+  },
+  {
+   "cat": "multi",
+   "instruction": "put the red cube on the orange plate, the green cube on the brown plate and the blue cube on the orange plate",
+   "expect": [
+    [
+     "pick",
+     "red cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ],
+    [
+     "pick",
+     "green cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ],
+    [
+     "pick",
+     "blue cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ]
+   ]
+  },
+  {
+   "cat": "quantifier",
+   "instruction": "put all four cubes on the brown plate",
+   "expect": [
+    [
+     "pick",
+     "red cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ],
+    [
+     "pick",
+     "green cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ],
+    [
+     "pick",
+     "blue cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ],
+    [
+     "pick",
+     "yellow cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ]
+   ],
+   "any_order": true
+  },
+  {
+   "cat": "quantifier",
+   "instruction": "move every cube except the red one onto the orange plate",
+   "expect": [
+    [
+     "pick",
+     "green cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ],
+    [
+     "pick",
+     "blue cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ],
+    [
+     "pick",
+     "yellow cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ]
+   ],
+   "any_order": true
+  },
+  {
+   "cat": "quantifier",
+   "instruction": "put the green and the blue cube on the brown plate",
+   "expect": [
+    [
+     "pick",
+     "green cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ],
+    [
+     "pick",
+     "blue cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ]
+   ],
+   "any_order": true
+  },
+  {
+   "cat": "quantifier",
+   "instruction": "put both cubes on the orange plate",
+   "expect": [
+    [
+     "pick",
+     "green cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ],
+    [
+     "pick",
+     "yellow cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ]
+   ],
+   "any_order": true,
+   "scene": {
+    "cubes": [
+     "green cube",
+     "yellow cube"
+    ]
+   }
+  },
+  {
+   "cat": "quantifier",
+   "instruction": "put the only cube on the brown plate",
+   "expect": [
+    [
+     "pick",
+     "blue cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ]
+   ],
+   "scene": {
+    "cubes": [
+     "blue cube"
+    ]
+   }
+  },
+  {
+   "cat": "quantifier",
+   "instruction": "put the yellow cube on the plate",
+   "expect": [
+    [
+     "pick",
+     "yellow cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ]
+   ],
+   "scene": {
+    "plates": [
+     "orange plate"
+    ]
+   }
+  },
+  {
+   "cat": "quantifier",
+   "instruction": "red and green go on the orange plate, blue and yellow on the brown plate",
+   "expect": [
+    [
+     "pick",
+     "red cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ],
+    [
+     "pick",
+     "green cube"
+    ],
+    [
+     "place",
+     "orange plate"
+    ],
+    [
+     "pick",
+     "blue cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ],
+    [
+     "pick",
+     "yellow cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ]
+   ],
+   "any_order": true
+  },
+  {
+   "cat": "quantifier",
+   "instruction": "put every cube on the plate of its own colour",
+   "expect": [
+    [
+     "pick",
+     "red cube"
+    ],
+    [
+     "place",
+     "red plate"
+    ],
+    [
+     "pick",
+     "yellow cube"
+    ],
+    [
+     "place",
+     "yellow plate"
+    ]
+   ],
+   "any_order": true,
+   "scene": {
+    "plates": [
+     "red plate",
+     "yellow plate"
+    ]
+   }
+  },
+  {
+   "cat": "holding",
+   "instruction": "put the cube you are holding on the brown plate",
+   "expect": [
+    [
+     "place",
+     "brown plate"
+    ]
+   ],
+   "holding": "green cube"
+  },
+  {
+   "cat": "holding",
+   "instruction": "put it on top of the red cube",
+   "expect": [
+    [
+     "stack",
+     "red cube"
+    ]
+   ],
+   "holding": "blue cube"
+  },
+  {
+   "cat": "holding",
+   "instruction": "put that on the orange plate and then put the red cube on the brown plate",
+   "expect": [
+    [
+     "place",
+     "orange plate"
+    ],
+    [
+     "pick",
+     "red cube"
+    ],
+    [
+     "place",
+     "brown plate"
+    ]
+   ],
+   "holding": "yellow cube"
+  },
+  {
+   "cat": "holding",
+   "instruction": "stack the green cube on the blue cube",
+   "expect": null,
+   "holding": "yellow cube",
+   "alt_expect": [
+    [
+     "place",
+     "orange plate"
+    ],
+    [
+     "pick",
+     "green cube"
+    ],
+    [
+     "stack",
+     "blue cube"
+    ]
+   ],
+   "note": "refusing or first putting the held cube on a plate are both accepted; orange or brown",
+   "alt_expect2": [
+    [
+     "place",
+     "brown plate"
+    ],
+    [
+     "pick",
+     "green cube"
+    ],
+    [
+     "stack",
+     "blue cube"
+    ]
+   ]
+  },
+  {
+   "cat": "impossible",
+   "instruction": "throw the red cube",
+   "expect": null
+  },
+  {
+   "cat": "impossible",
+   "instruction": "put the white cube on the orange plate",
+   "expect": null
+  },
+  {
+   "cat": "impossible",
+   "instruction": "put the green cube on the purple plate",
+   "expect": null
+  },
+  {
+   "cat": "impossible",
+   "instruction": "put the blue cube on the plate",
+   "expect": null
+  },
+  {
+   "cat": "impossible",
+   "instruction": "leave the yellow cube on the floor",
+   "expect": null
+  },
+  {
+   "cat": "impossible",
+   "instruction": "stack the orange plate on the red cube",
+   "expect": null
+  },
+  {
+   "cat": "impossible",
+   "instruction": "spin the green cube around",
+   "expect": null
+  },
+  {
+   "cat": "impossible",
+   "instruction": "give the blue cube to me",
+   "expect": null
+  },
+  {
+   "cat": "impossible",
+   "instruction": "put the cube on the brown plate",
+   "expect": null
+  },
+  {
+   "cat": "impossible",
+   "instruction": "tell me a joke",
+   "expect": null
+  },
+  {
+   "cat": "impossible",
+   "instruction": "put the green cube on the green cube",
+   "expect": null
+  },
+  {
+   "cat": "impossible",
+   "instruction": "open the drawer and put the red cube inside",
+   "expect": null
+  }
+ ]
+}
