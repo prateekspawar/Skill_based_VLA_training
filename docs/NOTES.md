@@ -584,9 +584,15 @@ Granularity study (experiments 1-4) complete; paper draft in `paper/` (authors a
    with two OV5647 cameras on its CSI ports (22-to-15 cables; the Arducam IMX219 CamArray kit never delivered
    image data) and the servo bus adapter on USB (`/dev/ttyACM0`); the PC runs perception, policies and IK and talks
    to small hosts on the Pi over wired Ethernet (ZeroMQ, as LeRobot's LeKiwi). Real images must be rectified to the
-   training intrinsics (512 x 512, fx 781.87 px, 60 mm baseline); the OV5647s see 72° across vs ~47° in the sim.
+   training intrinsics (512 x 512, fx 781.87 px, 60 mm baseline).
    Status 2026-11-01:
-   * stereo: 640 x 480 at 30 fps, libcamera software sync (0 ms L-R skew), ~30 ms exposure-to-PC, 33 Mbit/s;
+   * stereo: `real/stereo_host.py` (left = cam1, 1296 x 972 at 30 fps, libcamera software sync, 0 ms L-R skew;
+     640 x 480 measured ~30 ms exposure-to-PC, 33 Mbit/s);
+   * stereo calibration (`scripts/calibrate_stereo.py`, 72 ChArUco pairs, result `real/stereo_calib.json`): RMS
+     0.51 px, rectified rows within 0.28 px (median), **baseline 62.98 mm** (plate design 60), relative rotation
+     2.6°, fx ~1236 px = **55° horizontal FOV** (the seller's 72° is wrong; matches the v1 camera's 53.5°). The
+     sim's 36° view is a ~800 px centre crop resized to 512. The 8-coefficient rational lens model folds back
+     before the image corners; the standard 5-coefficient model fits equally well (0.003 px worse);
    * arm: LeRobot calibration done (`so101_follower`), all six joint directions match `so101_new_calib`, middle
      pose reads ~0° except wrist_flex ~+8° (offset in software if it matters);
    * powered hold and ±5° steps on every joint pass with `real/arm_host.py`. LeRobot's P = 16 leaves ~3° of
@@ -612,8 +618,9 @@ so101_lang/
   perception/                  stereo_depth, locate (OWLv2, locate9), verify (ranked detection), sam2_tracker
   policies/smolvla_depth/      LeRobot plugin (depth branch, relative actions)
   serve/policy_server.py       skill models + perception server; serve/skills.py shared-backbone swapping
-  real/                        Pi-side arm host (arm_host.py, arm_cmd.py client) + arm_config.json (per-joint
-                               gains, caps, safety limits; applied at every start); copied to the Pi as ~/so101_real
+  real/                        Pi-side hosts, copied to the Pi as ~/so101_real: arm_host.py (+ arm_cmd.py client,
+                               arm_config.json: per-joint gains, caps, safety limits, applied at every start),
+                               stereo_host.py (+ stereo_config.json); stereo_calib.json (the head's calibration)
   train_cli.py                 lerobot-train with the plugin registered
 scripts/
   run_stage_randcolor.sh       data generation → conversion → targets → per-skill datasets → training
@@ -624,6 +631,7 @@ scripts/
   demo.sh                      interactive demo: type an instruction, watch it in the Isaac Sim window
   run_eval_randcolor2.sh       the 2026-10-09 comparison (new vs old models, retry vs fused find)
   eval_policy.py               closed-loop evaluation;  gen_demos / gen_fail_demos / gen_find_demos.py: recorders
+  calibrate_stereo.py          real head: ChArUco capture window (auto-saves diverse still pairs) + stereo solve
   *.py                         diagnostics and benchmarks (depth, detection, SAM2, latency, sensitivity)
 train/                         training launchers
 tests/                         frame-maths tests, planner instruction set

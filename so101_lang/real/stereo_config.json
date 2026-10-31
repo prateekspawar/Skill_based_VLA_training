@@ -1,0 +1,9 @@
+{
+  "left_camera": 1,
+  "right_camera": 0,
+  "width": 1296,
+  "height": 972,
+  "fps": 30,
+  "jpeg_quality": 95,
+  "sync": true
+}
