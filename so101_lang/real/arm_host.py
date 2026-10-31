@@ -31,7 +31,7 @@ bus = FeetechMotorsBus(port=CFG["port"], motors={
     for n in NAMES}, calibration={n: MotorCalibration(**cal[n]) for n in NAMES})
 span = {n: (cal[n]["range_max"] - cal[n]["range_min"]) * 360 / 4096 for n in NAMES}
 margin = CFG["range_margin_deg"]
-limit = {n: (5.0, 95.0) if n == "gripper" else (-span[n] / 2 + margin, span[n] / 2 - margin) for n in NAMES}
+limit = {n: tuple(CFG["gripper_range_pct"]) if n == "gripper" else (-span[n] / 2 + margin, span[n] / 2 - margin) for n in NAMES}
 
 
 def write_eeprom(motor: str, values: dict, unlock: bool):

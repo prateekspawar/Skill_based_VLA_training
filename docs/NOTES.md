@@ -609,6 +609,15 @@ Granularity study (experiments 1-4) complete; paper draft in `paper/` (authors a
      re-measured from the same views (live rows −1.4 px median; a 22 mm board refresh would tighten it). Isaac's
      SO-101 USD differs from the URDF (base body frame, no 2.8° wrist tilt): `real/kinematics.py` (numpy FK,
      `SIM_BASE_FROM_BASE`) matches Isaac to 0 mm;
+   * end-to-end checks: `scripts/check_table_plane.py` (stereo depth into the base) puts the floor under the
+     robot's table at −276 mm, matching the measured table height, flat to 2.1 mm but tilted 2.5° (lower toward
+     −y; a level reading of the table top is still to do). `scripts/check_tip_overlay.py` on 6 poses outside the
+     hand-eye fit: the FK skeleton and the sim jaw meshes land on the real arm and jaw (by eye; with the board on
+     the jaw it reports corner errors); the zero offsets visibly improve the gripper position;
+   * gripper: **0 % = closed** (LeRobot's range_min). At 5.5 % the fingertips are ~10 mm apart (= 6.1° at ~95 mm);
+     closing below ~2 % the servo starts to lag and draw current (jaws meet). Real opening deg = % x 1.117 against
+     the sim's 0-100° (1.745 rad), so sim opening 1.0 = 89.5 %. `arm_host.py` clamps the gripper to
+     `gripper_range_pct` [0, 95] (was a hard-coded 5-95, which could not close the jaws);
    * 12 V supply sagged to 8.9 V on one large multi-joint move (safety stop); moves run at 10°/s now;
    * arm: LeRobot calibration done (`so101_follower`), all six joint directions match `so101_new_calib`, middle
      pose reads ~0° except wrist_flex ~+8° (offset in software if it matters);
