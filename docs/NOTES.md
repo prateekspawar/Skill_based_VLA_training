@@ -588,6 +588,10 @@ Granularity study (experiments 1-4) complete; paper draft in `paper/` (authors a
    Status 2026-11-01:
    * stereo: `real/stereo_host.py` (left = cam1, 1296 x 972 at 30 fps, libcamera software sync, 0 ms L-R skew;
      640 x 480 measured ~30 ms exposure-to-PC, 33 Mbit/s);
+   * exposure locked (`stereo_config.json` `exposure`; `"auto"` restores AE/AWB): both cameras at 33 ms, analogue
+     gain 8, colour gains [1.157, 1.645], the auto values under the room lamp (~20 lux, 3600 K; AE was at its limit,
+     so more light would allow a shorter exposure). The host's meta reports each camera's exposure, gain and colour
+     gains; `controls {json}` changes them live. Re-lock when the lighting changes;
    * stereo calibration (`scripts/calibrate_stereo.py`, 72 ChArUco pairs, result `real/stereo_calib.json`): RMS
      0.51 px, rectified rows within 0.28 px (median), **baseline 62.98 mm** (plate design 60), relative rotation
      2.6°, fx ~1236 px = **55° horizontal FOV** (the seller's 72° is wrong; matches the v1 camera's 53.5°). The

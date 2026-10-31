@@ -2,11 +2,17 @@
 
     setsid nohup python3 ~/so101_real/stereo_host.py > ~/so101_real/stereo_host.log 2>&1 < /dev/null &
 
-Settings in ``stereo_config.json`` (which CSI port is the left camera, mode, JPEG quality). With ``sync`` on, the
+Settings in ``stereo_config.json`` (which CSI port is the left camera, mode, JPEG quality, exposure). With ``sync`` on, the
 libcamera software sync locks the two sensors' frame timing (camera ``left`` leads); pairs are then matched by
 sensor timestamp (< half a frame apart, waiting briefly for the lagging camera). ZeroMQ on all interfaces:
 REP :5601, ``get`` -> [left.jpg, right.jpg, meta.json]; ``push N`` -> N pairs, one per new left frame, on PUSH
-:5602; ``stop`` exits. meta: exposure skew, frame age at send, encode time, frame counters, sensor timestamps.
+:5602; ``controls {json}`` applies libcamera controls to both cameras (for tuning); ``stop`` exits. meta: exposure
+skew, frame age at send, encode time, frame counters, sensor timestamps, and per camera the exposure time, analogue
+gain, colour gains and colour temperature in use.
+
+Exposure: ``"exposure": "auto"`` leaves AE/AWB on (each camera adjusts on its own, so colours drift as the scene
+changes); otherwise ``{"exposure_us", "analogue_gain", "colour_gains": [red, blue]}`` fixes both cameras to the
+same values (AE and AWB off), so the colours are stable and identical between the two images.
 Uses the system python3 (picamera2, simplejpeg, zmq from apt).
 """
 
@@ -23,27 +29,36 @@ from picamera2 import Picamera2
 
 CFG = json.loads(pathlib.Path(__file__).with_name("stereo_config.json").read_text())
 W, H, FPS, Q = CFG["width"], CFG["height"], float(CFG["fps"]), CFG["jpeg_quality"]
+MD_KEYS = ("ExposureTime", "AnalogueGain", "DigitalGain", "ColourGains", "ColourTemperature", "Lux")
+
+
+def fixed_exposure(e) -> dict:
+    if e == "auto":
+        return {}
+    return {"AeEnable": False, "AwbEnable": False, "ExposureTime": int(e["exposure_us"]),
+            "AnalogueGain": float(e["analogue_gain"]), "ColourGains": tuple(map(float, e["colour_gains"]))}  # "note" ignored
 
 
 class Cam:
     def __init__(self, idx: int, sync_role):
         self.cam = Picamera2(idx)
-        ctrl = {"FrameDurationLimits": (int(1e6 / FPS),) * 2}
+        ctrl = {"FrameDurationLimits": (int(1e6 / FPS),) * 2, **fixed_exposure(CFG.get("exposure", "auto"))}
         if sync_role is not None:
             ctrl["SyncMode"] = sync_role
         self.cam.configure(self.cam.create_video_configuration(
             main={"size": (W, H), "format": "RGB888"}, buffer_count=4, controls=ctrl))
-        self.cond, self.frame, self.ts, self.n = threading.Condition(), None, 0, 0
+        self.cond, self.frame, self.ts, self.n, self.md = threading.Condition(), None, 0, 0, {}
         self.cam.start()
         threading.Thread(target=self.loop, daemon=True).start()
 
     def loop(self):
         while True:
             req = self.cam.capture_request()
-            arr, ts = req.make_array("main"), req.get_metadata()["SensorTimestamp"]
+            arr, md = req.make_array("main"), req.get_metadata()
             req.release()
             with self.cond:
-                self.frame, self.ts, self.n = arr, ts, self.n + 1
+                self.frame, self.ts, self.n = arr, md["SensorTimestamp"], self.n + 1
+                self.md = {k: md[k] for k in MD_KEYS if k in md}
                 self.cond.notify_all()
 
     def latest(self):
@@ -78,7 +93,7 @@ def pair():
     enc = time.perf_counter() - t
     now = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
     meta = {"skew_ms": (tl - tr) / 1e6, "age_ms": (now - min(tl, tr)) / 1e6, "enc_ms": enc * 1e3, "n": [nl, nr],
-            "ts_ns": [tl, tr]}
+            "ts_ns": [tl, tr], "left": left.md, "right": right.md}
     return [jl, jr, json.dumps(meta).encode()]
 
 
@@ -99,6 +114,13 @@ while True:
                 left.cond.wait_for(lambda: left.n != last)
                 last = left.n
             push.send_multipart(pair())
+    elif msg.startswith("controls "):
+        c = json.loads(msg[len("controls "):])
+        if "ColourGains" in c:
+            c["ColourGains"] = tuple(c["ColourGains"])
+        for cam in (left, right):
+            cam.cam.set_controls(c)
+        rep.send(b"ok")
     elif msg == "stop":
         rep.send(b"bye")
         time.sleep(0.2)

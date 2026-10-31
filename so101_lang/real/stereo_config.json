@@ -5,5 +5,14 @@
   "height": 972,
   "fps": 30,
   "jpeg_quality": 95,
-  "sync": true
+  "sync": true,
+  "exposure": {
+    "exposure_us": 33000,
+    "analogue_gain": 8.0,
+    "colour_gains": [
+      1.157,
+      1.645
+    ],
+    "note": "2026-11-01, room lamp ~20 lux, 3600 K: auto exposure's own values (33 ms = full frame, gain 8 = its limit), AWB averaged over both cameras; re-lock if the lighting changes"
+  }
 }
