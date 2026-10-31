@@ -595,17 +595,20 @@ Granularity study (experiments 1-4) complete; paper draft in `paper/` (authors a
      before the image corners; the standard 5-coefficient model fits equally well (0.003 px worse);
    * **the camera modules do not hold their left-right pose**: rows drifted 7.6 px, 9.8 px (after tightening the
      screws), then ~57 px (~2° tilt) within one session. The OV5647 sensor sits on a daughterboard held by foam
-     tape; fix the modules mechanically (glue) before trusting stereo depth. `calibrate_stereo.py solve
+     tape; the modules are hot-glued now (gluing itself moved them ~0.2°; re-check rows after any handling). `calibrate_stereo.py solve
      --intrinsics <json>` re-solves only the left-right pose; the hand-eye solve re-measures it from its views;
    * hand-eye (`scripts/calibrate_handeye.py`, result `real/handeye.json`): the 90 mm board on the **moving jaw**
      (its opening is a sixth joint, so the steep head view can see the board face-on; on the fixed jaw it stayed
      55-65° oblique and mostly edge-on). The planner picks roll + opening to face the camera, rejects poses where
-     the arm hides the board and keeps the gripper, board and paths clear of table, base and head. 27 views:
-     **4.3 px RMS**; joint zero offsets fitted: shoulder_lift +2.5°, elbow_flex −2.0°, **wrist_flex −6.0°**
-     (true = reading + offset; the ~+8° straight-wrist reading). Repeat visit: 0.9 mm / 0.2° not explained by
-     the joints (the arm settles ~1.3° differently by approach direction). Head vs the training head:
-     `SO101_CAM_OFFSET=0.0368,-0.0112,0.0096,-3.82,0.61,0.00`. Isaac's SO-101 USD differs from the URDF (base
-     body frame, no 2.8° wrist tilt): `real/kinematics.py` (numpy FK, `SIM_BASE_FROM_BASE`) matches Isaac to 0 mm;
+     the arm hides the board and keeps the gripper, board and paths clear of table, base and head. Current result
+     (after hot-gluing the sensor modules; 21 views): **4.2 px RMS**; joint zero offsets shoulder_lift −0.1°,
+     elbow_flex −3.6°, **wrist_flex −4.4°** (true = reading + offset; ±0.7-0.9° by bootstrap; the run before
+     gluing gave +2.5 / −2.0 / −6.0, so treat them as ±2°). Head vs the training head (bootstrap ±3-5 mm,
+     ±0.3-0.7°): `SO101_CAM_OFFSET=0.0351,-0.0229,-0.0024,-1.99,-1.44,1.76`. Repeat visit: 0.3 mm / 0.06° not
+     explained by the joints (the arm settles ~1° differently by approach direction). Stereo left-right pose
+     re-measured from the same views (live rows −1.4 px median; a 22 mm board refresh would tighten it). Isaac's
+     SO-101 USD differs from the URDF (base body frame, no 2.8° wrist tilt): `real/kinematics.py` (numpy FK,
+     `SIM_BASE_FROM_BASE`) matches Isaac to 0 mm;
    * 12 V supply sagged to 8.9 V on one large multi-joint move (safety stop); moves run at 10°/s now;
    * arm: LeRobot calibration done (`so101_follower`), all six joint directions match `so101_new_calib`, middle
      pose reads ~0° except wrist_flex ~+8° (offset in software if it matters);
