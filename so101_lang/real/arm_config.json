@@ -17,6 +17,8 @@
   "ramp_default_deg_s": 10,
   "ramp_max_deg_s": 20,
   "range_margin_deg": 10,
+  "range_margin_override_deg": {"wrist_flex": 4},
   "gripper_range_pct": [0, 95],
-  "safety": {"max_following_deg": 6, "max_current_ma": 900, "max_temp_c": 55, "min_supply_v": 10.5}
+  "gripper_rate_pct_s": 80,
+  "safety": {"max_following_deg": 6, "following_exempt": ["gripper"], "max_current_ma": 900, "max_temp_c": 55, "min_supply_v": 10.5}
 }

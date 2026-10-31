@@ -55,8 +55,10 @@ Design goals (from the project owner):
 **Perception** (`so101_lang/perception/`, runs in the policy server):
 1. OWLv2 proposes candidate boxes for the request ("red cube") and for the noun.
 2. **Ranked detection** (`verify.py`) scores each box: detector score for request and noun, soft stereo size
-   likelihood, and the learned colour posterior of the object's own pixels (`color_model.json`: how much more it
-   looks like the requested colour than like any other colour name). The best box wins.
+   likelihood, and the learned **own-colour fit** of the object's own pixels (`color_model.json`, 2026-11-01: how
+   well they fit the requested colour's own sim + real components, chi-square tail per pixel; other colour names
+   never enter, so they cannot demote the requested one). The best box wins. (Until 2026-11-01: the relative
+   posterior over all colour names; ranks close sim pairs 1-8 points better, see section 8.)
 3. **Plausibility gate:** the winner must fit the request in size and colour; otherwise find looks again.
 4. 3-D point from the mask + Fast-FoundationStereo depth (TensorRT FP16, ~9 ms, ~2 mm error), arm pixels removed
    with robot keypoints from FK (8 mm / 1° hand-eye error simulated). Yaw from the top face, folded by the
@@ -588,10 +590,23 @@ Granularity study (experiments 1-4) complete; paper draft in `paper/` (authors a
    Status 2026-11-01:
    * stereo: `real/stereo_host.py` (left = cam1, 1296 x 972 at 30 fps, libcamera software sync, 0 ms L-R skew;
      640 x 480 measured ~30 ms exposure-to-PC, 33 Mbit/s);
-   * exposure locked (`stereo_config.json` `exposure`; `"auto"` restores AE/AWB): both cameras at 33 ms, analogue
-     gain 8, colour gains [1.157, 1.645], the auto values under the room lamp (~20 lux, 3600 K; AE was at its limit,
-     so more light would allow a shorter exposure). The host's meta reports each camera's exposure, gain and colour
-     gains; `controls {json}` changes them live. Re-lock when the lighting changes;
+   * exposure locked (`stereo_config.json` `exposure`; `"auto"` restores AE/AWB): both cameras at 33 ms (full frame),
+     **analogue gain 16** (AE stops at 8, which left images at ~55/255; 24 clips the lit top of the white cube), colour
+     gains **[1.394, 1.806]** set so the white cube reads neutral over both faces (RGB 164/163/163; AWB's own
+     [1.157, 1.645] gave a green-cyan cast). Room lamp ~20 lux. The hand-set colour rules then score the cube white
+     0.24 (gate 0.15) and the plate yellow 0.95; the learned colour model still fails on real images (refit
+     pending). The left module's lens shading leaves purple corners. The host's meta reports each camera's exposure,
+     gain and colour gains; `controls {json}` changes them live. Re-lock when the lighting changes;
+   * colour model refit with real pixels (`scripts/collect_real_colors.py` -> `fit_color_model.py --real`): real
+     components `white|cube_real`, `yellow|plate_real`, `table|table_real` (5 side views x 3 frames, 1 lighting;
+     frames whose median colour is > 20 Lab off the majority are dropped: the detector's "yellow plate" box was a
+     beige floor tile in 2 of 5 views) added to the sim ones. Scoring switched to the own-colour fit (user
+     decision: the requested colour is judged on its own, never demoted by other names), gate 0.15. Held-out:
+     true objects median 0.68-0.98, 95-100 % pass. Ranking of requested vs other-colour objects 92.7-99.8 % per
+     colour (relative posterior 95.6-99.9 %; losses on orange vs yellow 75 vs ~90 %, pink vs brown 73 vs 81 %,
+     purple vs brown 79 vs 86 %). Absent objects are accepted more often: on the real scene "blue plate" (0.19) and
+     "orange plate" (0.60) pass on the yellow plate, "red cube" is rejected (0.00). White cube 0.63, yellow plate
+     0.87 (were 0.004 / 0.22). Sim pick+place with the new scoring not yet re-evaluated;
    * stereo calibration (`scripts/calibrate_stereo.py`, 72 ChArUco pairs, result `real/stereo_calib.json`): RMS
      0.51 px, rectified rows within 0.28 px (median), **baseline 62.98 mm** (plate design 60), relative rotation
      2.6°, fx ~1236 px = **55° horizontal FOV** (the seller's 72° is wrong; matches the v1 camera's 53.5°). The

@@ -137,12 +137,15 @@ def measure_size(calib: dict, depth: np.ndarray, box, robot_points=None, robot_r
 
 
 # Learned colour model (default; SO101_COLOR_MODEL=rule for the hand-set HSV rules below). One Gaussian in CIELab
-# per (colour name, object kind) plus the table, fitted on rendered pixels of the training data
-# (scripts/fit_color_model.py). A pixel's score for a name is its posterior over all names (equal priors), 0 when
-# it fits no component (chi-square 99.9 %): the requested colour only has to look more like itself than like the
-# other names under this lighting, which washes every colour towards pastel.
+# per (colour name, object kind, source) plus the table, fitted on rendered pixels of the training data and on real
+# camera pixels (scripts/fit_color_model.py; real components are named "<colour>|<kind>_real"). A candidate is
+# scored by its OWN-colour fit only: per pixel, the chi-square(3) tail probability of its distance to the nearest
+# component of the requested name (a pixel of that colour scores uniform 0..1, mean 0.5), averaged over the
+# object's pixels. Other colour names never enter, so a colour that happens to sit near another one (orange /
+# yellow, pink / white under bright light) is not pushed down by it. color_posterior (the earlier relative score)
+# is kept for diagnostics.
 COLOR_MODEL_PATH = Path(__file__).with_name("color_model.json")
-COLOR_GATE = {"learned": 0.25, "rule": 0.15}  # plausibility threshold on the colour term
+COLOR_GATE = {"learned": 0.15, "rule": 0.15}  # plausibility threshold on the colour term (learned: 95-100 % of true objects pass)
 
 
 def color_mode() -> str:
@@ -177,10 +180,24 @@ def color_posterior(rgb_pixels: np.ndarray) -> dict[str, float]:
     return {n: float(v) for n, v in zip(names, p.mean(1))}
 
 
+def color_own_fit(rgb_pixels: np.ndarray, color: str) -> float:
+    """Mean over the pixels (N, 3 uint8) of how well each fits the named colour's own components: chi-square(3)
+    tail probability of its squared Mahalanobis distance to the nearest one, in [0, 1]."""
+    import cv2
+    from scipy.special import gammaincc
+
+    names, mus, cinv, _, member, _ = _color_model()
+    mus, cinv = mus[member[names.index(color)]], cinv[member[names.index(color)]]
+    x = cv2.cvtColor(rgb_pixels.reshape(-1, 1, 3).astype(np.uint8), cv2.COLOR_RGB2LAB).reshape(-1, 3).astype(float)
+    d = x[None] - mus[:, None]
+    m2 = np.einsum("kni,kij,knj->kn", d, cinv, d).min(0)
+    return float(gammaincc(1.5, m2 / 2).mean())  # chi2(3) survival function
+
+
 def color_similarity(rgb_pixels: np.ndarray, color: str) -> float:
-    """Similarity of the pixels (N, 3 uint8) to a colour name, in [0, 1]: learned posterior, or the HSV rule."""
+    """Similarity of the pixels (N, 3 uint8) to a colour name, in [0, 1]: learned own-colour fit, or the HSV rule."""
     if color_mode() == "learned" and color in _color_model()[0]:
-        return color_posterior(rgb_pixels)[color]
+        return color_own_fit(rgb_pixels, color)
     return color_similarity_rule(rgb_pixels, color)
 
 

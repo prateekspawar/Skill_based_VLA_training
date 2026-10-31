@@ -5,8 +5,10 @@
 Every start applies ``arm_config.json``: per-joint P/I/D gains, gripper protections, torque/speed/acceleration caps.
 If torque is already on (servos holding from an earlier host), the held pose is adopted without releasing it; the
 EEPROM gain registers are then written through an unlock/relock. Moves ramp the setpoints at <= ``ramp_max_deg_s``,
-targets are clamped ``range_margin_deg`` inside the calibrated ranges, and a fault seen on two consecutive readings
-(following error, current, temperature, supply; single corrupted bus reads do occur) FREEZES the arm at its
+targets are clamped ``range_margin_deg`` (per joint: ``range_margin_override_deg``) inside the calibrated ranges (gripper: ``gripper_range_pct``, ramped at
+``gripper_rate_pct_s``), and a fault seen on two consecutive readings (following error, except the joints in
+``following_exempt``: a gripper closed on an object stays behind its setpoint; current, temperature, supply; single
+corrupted bus reads do occur) FREEZES the arm at its
 present pose until ``reset``. Torque goes off only on ``release``. Uses LeRobot's calibration file
 (``~/.cache/huggingface/lerobot/calibration/robots/so_follower/<calibration_id>.json``): degrees, gripper 0-100.
 """
@@ -31,7 +33,9 @@ bus = FeetechMotorsBus(port=CFG["port"], motors={
     for n in NAMES}, calibration={n: MotorCalibration(**cal[n]) for n in NAMES})
 span = {n: (cal[n]["range_max"] - cal[n]["range_min"]) * 360 / 4096 for n in NAMES}
 margin = CFG["range_margin_deg"]
-limit = {n: tuple(CFG["gripper_range_pct"]) if n == "gripper" else (-span[n] / 2 + margin, span[n] / 2 - margin) for n in NAMES}
+margin = {n: CFG.get("range_margin_override_deg", {}).get(n, margin) for n in NAMES}
+limit = {n: tuple(CFG["gripper_range_pct"]) if n == "gripper" else (-span[n] / 2 + margin[n], span[n] / 2 - margin[n])
+         for n in NAMES}
 
 
 def write_eeprom(motor: str, values: dict, unlock: bool):
@@ -130,8 +134,8 @@ while running:
         break
     # ----- control: ramp the setpoint toward the target -----
     if state == "MOVING":
-        step = rate / hz
-        setp = {n: setp[n] + max(-step, min(step, target[n] - setp[n])) for n in NAMES}
+        step = {n: (CFG["gripper_rate_pct_s"] if n == "gripper" else rate) / hz for n in NAMES}
+        setp = {n: setp[n] + max(-step[n], min(step[n], target[n] - setp[n])) for n in NAMES}
         bus.sync_write("Goal_Position", setp)
     # ----- telemetry + safety, ~10 Hz -----
     if k % 5 == 0:
@@ -145,7 +149,7 @@ while running:
                 for n in NAMES:
                     worst[n] = max(worst[n], abs(p[n] - setp[n]))
                 fault = ([f"{n}: following error {abs(p[n] - setp[n]):.1f} deg" for n in NAMES
-                          if abs(p[n] - setp[n]) > SAFE["max_following_deg"]]
+                          if abs(p[n] - setp[n]) > SAFE["max_following_deg"] and n not in SAFE["following_exempt"]]
                          + [f"{n}: current {tele['cur'][n]:.0f} mA" for n in NAMES if tele["cur"][n] > SAFE["max_current_ma"]]
                          + [f"{n}: {temp[n]} C" for n in NAMES if temp[n] > SAFE["max_temp_c"]]
                          + ([f"supply {volt:.1f} V"] if volt < SAFE["min_supply_v"] else []))
