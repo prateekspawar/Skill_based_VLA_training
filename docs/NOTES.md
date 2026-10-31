@@ -580,10 +580,19 @@ Granularity study (experiments 1-4) complete; paper draft in `paper/` (authors a
    (environment wrapper with depth, demo segmentation into skills, Franka adapter).
 3. **Real robot:** a small SO-101 study (hand-eye calibration of the head, standalone IK, real stereo camera; refit
    the colour model and the gripper-opening thresholds on real data). Camera pose: virtual head (done, above);
-   calibration targets in `hardware/calibration/`. Setup: Raspberry Pi 5 with both IMX219s on its two CSI ports and
-   the Waveshare Bus Servo Adapter (A) on USB (jumpers on B, USB-SERVO); the PC runs perception, policies and IK
-   and talks to a small host on the Pi over wired Ethernet (ZeroMQ, as LeRobot's LeKiwi). Real images must be
-   rectified to the training intrinsics (512 x 512, fx 781.87 px, 60 mm baseline).
+   calibration targets in `hardware/calibration/`. Setup: Raspberry Pi 5 (`pi5-eth`, 10.0.0.4 on a direct cable)
+   with two OV5647 cameras on its CSI ports (22-to-15 cables; the Arducam IMX219 CamArray kit never delivered
+   image data) and the servo bus adapter on USB (`/dev/ttyACM0`); the PC runs perception, policies and IK and talks
+   to small hosts on the Pi over wired Ethernet (ZeroMQ, as LeRobot's LeKiwi). Real images must be rectified to the
+   training intrinsics (512 x 512, fx 781.87 px, 60 mm baseline); the OV5647s see 72° across vs ~47° in the sim.
+   Status 2026-11-01:
+   * stereo: 640 x 480 at 30 fps, libcamera software sync (0 ms L-R skew), ~30 ms exposure-to-PC, 33 Mbit/s;
+   * arm: LeRobot calibration done (`so101_follower`), all six joint directions match `so101_new_calib`, middle
+     pose reads ~0° except wrist_flex ~+8° (offset in software if it matters);
+   * powered hold and ±5° steps on every joint pass with `real/arm_host.py`. LeRobot's P = 16 leaves ~3° of
+     gravity sag on shoulder_lift and elbow_flex; P = 32 on those two joints (in `real/arm_config.json`) brings it
+     to ~1.3° without oscillation. LeRobot's SOFollower rewrites one P for all joints on connect, so a LeRobot-based
+     client must re-apply the per-joint gains afterwards.
 4. Re-aiming during the descent after late pushes (retries cover it today); find failures (blue cube not proposed).
 5. LLM planner + re-planning: done for pick-and-place (results above). Interactive demo: `scripts/demo.sh`.
    Stacking (towers, cube on a plated cube) set aside for now.
@@ -603,6 +612,8 @@ so101_lang/
   perception/                  stereo_depth, locate (OWLv2, locate9), verify (ranked detection), sam2_tracker
   policies/smolvla_depth/      LeRobot plugin (depth branch, relative actions)
   serve/policy_server.py       skill models + perception server; serve/skills.py shared-backbone swapping
+  real/                        Pi-side arm host (arm_host.py, arm_cmd.py client) + arm_config.json (per-joint
+                               gains, caps, safety limits; applied at every start); copied to the Pi as ~/so101_real
   train_cli.py                 lerobot-train with the plugin registered
 scripts/
   run_stage_randcolor.sh       data generation → conversion → targets → per-skill datasets → training

@@ -1,0 +1,21 @@
+{
+  "port": "/dev/ttyACM0",
+  "calibration_id": "so101_follower",
+  "gains": {
+    "shoulder_pan":  {"p": 16, "i": 0, "d": 32},
+    "shoulder_lift": {"p": 32, "i": 0, "d": 32},
+    "elbow_flex":    {"p": 32, "i": 0, "d": 32},
+    "wrist_flex":    {"p": 16, "i": 0, "d": 32},
+    "wrist_roll":    {"p": 16, "i": 0, "d": 32},
+    "gripper":       {"p": 16, "i": 0, "d": 32}
+  },
+  "gripper_protection": {"max_torque_limit": 500, "protection_current": 250, "overload_torque": 25},
+  "torque_cap": 600,
+  "motor_speed": 400,
+  "motor_accel": 20,
+  "ramp_hz": 50,
+  "ramp_default_deg_s": 10,
+  "ramp_max_deg_s": 20,
+  "range_margin_deg": 10,
+  "safety": {"max_following_deg": 6, "max_current_ma": 900, "max_temp_c": 55, "min_supply_v": 10.5}
+}
