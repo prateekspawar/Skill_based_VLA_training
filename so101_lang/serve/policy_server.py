@@ -1,7 +1,8 @@
 """Serve the skill models and perception to the simulator over a local socket (run in ``~/lerobot-env``).
 
 Policy queries: the simulator process (``~/isaacsim``) sends ``{"left", "right" (H,W,3 uint8), "state", "task",
-"target"}`` and receives a head-frame action chunk (skill models: ``(T, 12)`` = TCP pose + gripper + [done,
+"target"}`` (optional ``"ablate": ["images", "pointmap"]`` and ``"return_pointmap"`` for diagnostics) and
+receives a head-frame action chunk (skill models: ``(T, 12)`` = TCP pose + gripper + [done,
 success]). Perception commands (``locate9``, ``find_start``, ``sam2_update``, ...) run OWLv2 ranked detection,
 stereo depth and the SAM2 trackers here. Run from the repository root:
 
@@ -104,7 +105,13 @@ def build_obs(msg: dict, depth) -> dict:
             obs["observation.images.depth"] = to_image(depth_to_rgb(z, depth.cfg.near, depth.cfg.far), "cuda")
         if depth.uses["pointmap"]:
             pm = virtual_head.apply_pointmap(POLICY_FROM_REAL, depth_to_pointmap(z, depth.uses["calibration"], POINTMAP_SIZE))
+            if "pointmap" in msg.get("ablate", ()):
+                pm = np.zeros_like(pm)  # 0 = unknown
             obs["observation.pointmap"] = torch.from_numpy(pm).unsqueeze(0).cuda()
+            build_obs.last_pointmap = pm
+    if "images" in msg.get("ablate", ()):  # diagnostics: uniform grey instead of the camera images
+        for k in ("observation.images.left", "observation.images.right"):
+            obs[k] = torch.full_like(obs[k], 0.5)
     return obs
 
 
@@ -266,7 +273,10 @@ def main():
                     with torch.no_grad():
                         chunk = policy.predict_action_chunk(pre(obs))  # (1, T, D), normalized
                         chunk = post(chunk)
-                    conn.send({"actions": chunk[0].float().cpu().numpy(), "t_depth": t_depth, "t_total": time.time() - t0})
+                    reply = {"actions": chunk[0].float().cpu().numpy(), "t_depth": t_depth, "t_total": time.time() - t0}
+                    if msg.get("return_pointmap"):
+                        reply["pointmap"] = getattr(build_obs, "last_pointmap", None)
+                    conn.send(reply)
                 print("[server] client disconnected", flush=True)
 
 

@@ -13,8 +13,9 @@ Needs ``arm_host.py`` and ``stereo_host.py`` on the Pi. The real robot stands in
 * state: measured joints + the hand-eye zero offsets -> URDF FK (gripper link) in the sim's base body ->
   TCP (adapter offset) in the training head frame; gripper opening = joint angle / 1.745 rad.
 * actions: 10-D head-frame TCP pose -> gripper-link pose in the base -> damped least-squares IK on the 5 arm joints
-  (from the last solution) -> joint readings (minus the offsets) -> arm host, one action per 50 ms (the sim's 20 Hz);
-  the host ramps at <= its rate cap. Gripper: opening -> % (0 % = closed; 1.0 = 1.745 rad = 89.5 %).
+  (from the last solution) -> joint readings (minus the offsets) -> arm host. Paced in arm time by default
+  (``--pace track``: the next action once the arm has reached this one, as the sim arm does within a step or two;
+  on wall-clock pacing the 3-5x slower real arm lagged and the model closed 2.5-5 cm short and off-centre). Gripper: opening -> % (0 % = closed; 1.0 = 1.745 rad = 89.5 %).
 * safety: TCP target held >= ``--min-tcp-z`` above the table and inside ``--max-reach``; any IK solution that
   leaves the joint ranges or puts gripper points below the table is skipped (arm holds); Ctrl-C freezes the arm.
 
@@ -218,13 +219,29 @@ def main():
     ap.add_argument("--rate", type=float, default=20.0, help="[deg/s] host ramp cap for policy moves")
     ap.add_argument("--min-tcp-z", type=float, default=0.012, help="[m] TCP above the table")
     ap.add_argument("--max-reach", type=float, default=0.40)
-    ap.add_argument("--timeout", type=float, default=25.0, help="[s] per skill")
+    ap.add_argument("--timeout", type=float, default=16.0, help="[s] of sim time (executed steps x 50 ms) per skill")
+    ap.add_argument("--pace", choices=["track", "clock"], default="track",
+                    help="track: each action waits until the arm is within --track-tol of it (the models were trained "
+                         "on a sim arm that tracks its commands within a step or two; the real arm is 3-5x slower); "
+                         "clock: one action per 50 ms regardless")
+    ap.add_argument("--track-tol", type=float, default=0.5, help="[deg]")
+    ap.add_argument("--track-timeout", type=float, default=1.0, help="[s] per action")
+    ap.add_argument("--integral", type=float, default=0.5,
+                    help="gain of the per-joint integral correction (bias += gain x remaining error after each action, "
+                         "+-4 deg): the servos stop ~1-3 deg short, which left the TCP ~2 mm short per chunk toward "
+                         "the fixed jaw; the model corrects back only slowly, so it summed to 1.5-2.5 cm at the close")
     ap.add_argument("--freeze-radius", type=float, default=0.03)
     ap.add_argument("--release-gate", type=float, nargs=2, default=(0.04, 0.065))
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--hover", type=float, default=None, metavar="Z",
+                    help="[m] diagnostics: TCP floor at Z (no contact with a 3 cm cube from ~0.05), pick only, "
+                         "observations saved")
+    ap.add_argument("--save-obs", action="store_true", help="save every query (images, state, target, actions)")
     ap.add_argument("--track", action="store_true", help="SAM2 target updates during the skills (default: the targets "
                     "found from the clear view stay fixed)")
     args = ap.parse_args()
+    if args.hover is not None:
+        args.min_tcp_z, args.save_obs = args.hover, True
 
     train = json.loads(TRAIN_CALIB.read_text())
     st_json = json.loads((ROOT / "so101_lang/real/stereo_calib.json").read_text())
@@ -274,7 +291,8 @@ def main():
         server({"cmd": "reset", "seed": args.seed, "skill": skill})
         q_seed = robot.true_q(reading())
         t0, n, verdict_run, result, released = time.time(), 0, 0, None, False
-        while time.time() - t0 < args.timeout and result is None:
+        bias = dict.fromkeys(ARM, 0.0)
+        while n < args.timeout / STEP_DT and result is None:  # timeout in sim time (executed steps)
             rd = reading()
             tcp_h = robot.state(rd)[:3]
             l, r = images()
@@ -291,6 +309,10 @@ def main():
             st = robot.state(rd)
             rep = server({"left": l, "right": r, "state": st, "task": text, "target": target})
             acts = np.asarray(rep["actions"])
+            if args.save_obs:
+                k_obs = len(list(out.glob(f"obs_{skill}_*")))
+                np.savez_compressed(out / f"obs_{skill}_{k_obs:03d}.npz", left=l, right=r,
+                                    state=st, target=target, actions=acts, t=time.time() - t0, reading=json.dumps(rd))
             log.write(json.dumps({"skill": skill, "t": time.time() - t0, "state": st.tolist(), "target": target.tolist(),
                                   "actions": acts[:EXEC_STEPS].tolist(), "reading": rd}) + "\n")
             if args.dry:
@@ -327,10 +349,22 @@ def main():
                     print(f"  [{skill}] skipped action (IK err {1000 * ep:.0f} mm, safe {robot.ok(q_sol)})", flush=True)
                     continue
                 q_seed = q_sol
-                r_ = arm.call({"cmd": "move", "targets": {**robot.reading_q(q_sol), "gripper": pct}, "rate": args.rate})
+                goal = robot.reading_q(q_sol)
+                cmd = {j: goal[j] + bias[j] for j in ARM}  # integral correction of the servos' steady-state error
+                r_ = arm.call({"cmd": "move", "targets": {**cmd, "gripper": pct}, "rate": args.rate})
                 if r_.get("error") or r_["state"] == "STOPPED":
                     raise RuntimeError(f"arm: {r_.get('error') or r_['reason']}")
                 n += 1
+                if args.pace == "track":  # arm time: next action once the arm has (nearly) reached this one
+                    while time.time() - t_step < args.track_timeout:
+                        pos = status()["pos"]
+                        if max(abs(pos[j] - goal[j]) for j in ARM) < args.track_tol:
+                            break
+                        time.sleep(0.02)
+                    if args.integral > 0:
+                        pos = status()["pos"]
+                        for j in ARM:
+                            bias[j] = float(np.clip(bias[j] + args.integral * (goal[j] - pos[j]), -4.0, 4.0))
                 time.sleep(max(0.0, STEP_DT - (time.time() - t_step)))
             print(f"  [{skill}] t {time.time() - t0:4.1f}s TCP {np.round(robot.state(reading())[:3], 3)} target "
                   f"{np.round(perceived[skill], 3)} grip {robot.state(reading())[9]:.2f} done/success "
@@ -363,7 +397,9 @@ def main():
         rot6d = {sk: p[3:] for sk, p in poses.items()}
         res = run_skill("pick", PICK_TEXT.format(args.cube), perceived, rot6d, queries)
         print("pick verdict", res, "| gripper opening", round(float(robot.state(reading())[9]), 3), flush=True)
-        if not args.dry:
+        if args.hover is not None:
+            pass
+        elif not args.dry:
             if robot.state(reading())[9] < 0.05:
                 print("grasp check failed: gripper closed on nothing", flush=True)
             else:

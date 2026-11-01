@@ -637,6 +637,18 @@ Granularity study (experiments 1-4) complete; paper draft in `paper/` (authors a
      closing below ~2 % the servo starts to lag and draw current (jaws meet). Real opening deg = % x 1.117 against
      the sim's 0-100° (1.745 rad), so sim opening 1.0 = 89.5 %. `arm_host.py` clamps the gripper to
      `gripper_range_pct` [0, 95] (was a hard-coded 5-95, which could not close the jaws);
+   * policy on the real arm (`scripts/run_real.py`; server with `SO101_CAM_OFFSET` and
+     `--calibration outputs/real/stereo_calibration_real.json`): find from a side view (pan 60, the arm hid the
+     plate from home), IK with joint limits as an active set. Wall-clock pacing let the arm lag the model (closed
+     2.5-5 cm short); `--pace track` waits per action until the joints arrive (sim-time timeouts). Hover test
+     (`--hover 0.06`, cube 3 cm at ~21 cm; `--save-obs` + offline replays with the server's `ablate` option): the
+     fixed jaw heading for the cube centre is **not perception**: blanking images / zeroing the point map moves the
+     aim 0.5-3 mm, the step text's colour < 1 mm, target height/tilt and state orientation ~0. Cause: each chunk the
+     real TCP ends ~1.8 mm short of the command (median; −1.2..−3.1, always toward the fixed jaw: servo dead band +
+     track tolerance), and the model corrects slowly (a 2 cm target shift moves its chunk by 2.4 mm), so the aim
+     drifted −9 → −47 mm. Integral correction (`--integral 0.5`: half the remaining joint error is added to the next
+     command, ±4° cap; `--track-tol 0.5`): per-chunk error −0.1 mm, aim within ±8 mm with no drift (sim: cube
+     +12.6 mm toward the moving jaw at the same phase). Cost: 94 s per pick (1 s timeouts);
    * 12 V supply sagged to 8.9 V on one large multi-joint move (safety stop); moves run at 10°/s now;
    * arm: LeRobot calibration done (`so101_follower`), all six joint directions match `so101_new_calib`, middle
      pose reads ~0° except wrist_flex ~+8° (offset in software if it matters);
