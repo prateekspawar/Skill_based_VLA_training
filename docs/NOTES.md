@@ -649,6 +649,19 @@ Granularity study (experiments 1-4) complete; paper draft in `paper/` (authors a
      drifted −9 → −47 mm. Integral correction (`--integral 0.5`: half the remaining joint error is added to the next
      command, ±4° cap; `--track-tol 0.5`): per-chunk error −0.1 mm, aim within ±8 mm with no drift (sim: cube
      +12.6 mm toward the moving jaw at the same phase). Cost: 94 s per pick (1 s timeouts);
+   * first real pick-and-place (run 20261101_053448, `--track-tol 1.0 --track-timeout 0.6`, 42 s): servo error
+     stayed ~1 mm/chunk, but the model closed with the cube 14-22 mm toward the fixed jaw (missed, nudged the
+     cube). **Correction to the hover finding: the images do matter.** Ideal-tracking offline rollouts (state <-
+     last action, frame-0 images held fixed; scratchpad `rollout*.py`) from 4 sim start states of nearby
+     episodes close at **−8..+7 mm with the episode's sim images** but **−14..−24 mm with the real images**, the
+     same as with grey images (−21) — the model gets nothing from the real images and falls back to a blind
+     prior that closes ~2 cm toward the fixed jaw. Single-query ablations on real images could not show this
+     (those images were already uninformative). Point map: no effect either way. Per-channel colour matching of the
+     real images to sim: ~3 mm. The gap is the scene itself (orange real arm vs yellow sim arm, patterned floor
+     and table edge in view, real head pose ~4 cm / ~2-3° off the training head, one cube). Expert at the close:
+     −0.5 mm (IQR −4..+4). Lateral feedback is weak: shifting the state 20 mm sideways near the cube changes the
+     command by 0.6-7 mm, so the approach offset persists to the close. Flow-matching noise: aim sd 5 mm on the
+     first chunk, ~2 mm later;
    * 12 V supply sagged to 8.9 V on one large multi-joint move (safety stop); moves run at 10°/s now;
    * arm: LeRobot calibration done (`so101_follower`), all six joint directions match `so101_new_calib`, middle
      pose reads ~0° except wrist_flex ~+8° (offset in software if it matters);
