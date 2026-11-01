@@ -2,15 +2,20 @@
 planner turns it into goals, perception finds the objects and checks which goals the table already meets.
 
     scripts/demo_real.sh            (starts the policy server for perception if it is not running)
-    ~/lerobot-env/bin/python scripts/demo_real.py [--objects "white cube" "yellow plate"] [--execute]
+    ~/lerobot-env/bin/python scripts/demo_real.py [--execute] [--instruction "put the red cube on the blue plate"]
 
 Needs ``arm_host.py`` / ``stereo_host.py`` on the Pi, the policy server (OWLv2 + stereo depth; started with
 ``SO101_CAM_OFFSET`` and ``--calibration outputs/real/stereo_calibration_real.json``) and ``ollama serve``.
 
-Window: the live left camera (rectified, as the models see it) with the perceived objects boxed; the objects on the
-table (editable; the planner only knows these); the instruction box; the plan with each goal's status; the step
-running now. "Look" moves the arm to the side view (it hides the plates from home), finds every object and returns
-home. "Run" plans, looks and checks the goals. With "Execute on the arm" on, each unmet cube-on-plate goal runs
+Only the instruction is typed: the objects it names ("red cube", "blue plate", a plain "cube") are the scene the
+planner gets. Perception ranks every detected object against each name and the best one wins, however poor its
+match; its confidence (detector score, colour fit) is shown, and below the plausibility gate it is drawn orange as
+"low confidence" (magenta) instead of being rejected.
+
+Window: the live left camera (rectified, as the models see it) with the perceived objects boxed; the instruction
+box; the objects found for it; the plan with each goal's status; the step running now. "Look" moves the arm to the
+side view (it hides the plates from home), finds the instruction's objects and returns home. "Run" plans, looks
+and checks the goals. With "Execute on the arm" on, each unmet cube-on-plate goal runs
 ``scripts/run_real.py --cube .. --plate ..`` (pick + place policies), then the table is looked at again; a goal is
 tried up to ``--tries`` times (``planner.next_goal``, as the sim demo's re-planning). Stacking is not run on the arm.
 """
@@ -20,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -36,11 +42,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import calibrate_handeye as ch  # noqa: E402
 import run_real as rr  # noqa: E402
 from so101_lang import planner as planner_mod  # noqa: E402
+from so101_lang.perception.verify import COLORS as COLOR_WORDS  # noqa: E402
 
 CUBE_SIZE, PLATE_RADIUS = 0.03, 0.045  # [m] as so101_lang/envs/pick_place_env_cfg.py (sim) and the real cubes
 VIEW_PX = 512
-COLORS = {"seen": (90, 230, 90), "unseen": (255, 90, 90), "pick": (0, 220, 255), "place": (255, 150, 0)}  # RGB
+COLORS = {"seen": (90, 230, 90), "unseen": (230, 90, 230), "pick": (0, 220, 255), "place": (255, 150, 0)}  # RGB
+KINDS = {"cube": "cube", "cubes": "cube", "block": "cube", "blocks": "cube",
+         "plate": "plate", "plates": "plate", "dish": "plate", "dishes": "plate"}
+OBJECT_RE = re.compile(rf"\b(?:({'|'.join(COLOR_WORDS)})\s+)?({'|'.join(KINDS)})\b")
 RUN_REAL_ARGS = ["--track", "--min-tcp-z", "0.018", "--track-tol", "1.0", "--track-timeout", "0.6"]
+
+
+def instruction_objects(instr: str) -> tuple[list[str], list[str]]:
+    """Cubes and plates the instruction names ("red cube", plain "plate"), in order: the planner's scene."""
+    names = list(dict.fromkeys(f"{c + ' ' if c else ''}{KINDS[k]}" for c, k in OBJECT_RE.findall(instr.lower())))
+    return [n for n in names if n.endswith("cube")], [n for n in names if n.endswith("plate")]
 
 
 def perceived_on(c, s, stack: bool):
@@ -99,7 +115,8 @@ class RealScene:
         return True
 
     def look(self, names: list[str], say) -> dict:
-        """Side view, locate9 of every object, back home. name -> dict(base, box, plausible); base None if unseen."""
+        """Side view, locate9 of every name (the best-ranked object wins, plausible or not), back home.
+        name -> dict(base, box, plausible, terms)."""
         arm = ch.Arm()
         try:
             say("moving to the side view")
@@ -116,7 +133,7 @@ class RealScene:
                 rep = self.server({"cmd": "locate9", "left": l, "right": r, "query": n, "robot_points": pts})
                 ok = rep.get("detect", {}).get("plausible", True) is not False
                 p = np.asarray(rep["pose9"][:3])
-                seen[n] = {"base": self.head_b[:3, :3] @ p + self.head_b[:3, 3] if ok else None,
+                seen[n] = {"base": self.head_b[:3, :3] @ p + self.head_b[:3, 3],
                            "box": rep.get("box"), "plausible": ok, "terms": rep.get("detect", {}).get("terms")}
             if moved:
                 say("going home")
@@ -154,17 +171,12 @@ class DemoWindow:
         self.result = tk.Label(right, text="", fg=fg, bg=bg, font=("Helvetica", 15, "bold"), wraplength=430,
                                justify="left")
         self.result.pack(anchor="w")
-        tk.Label(right, text="Objects on the table (comma separated; the planner knows only these):", fg=fg,
-                 bg=bg).pack(anchor="w", pady=(10, 0))
-        self.objects = tk.Entry(right, width=52)
-        self.objects.insert(0, ", ".join(args.objects))
-        self.objects.pack(anchor="w")
-        self.seen_label = tk.Label(right, text="", fg="#b0b0b0", bg=bg, wraplength=430, justify="left")
-        self.seen_label.pack(anchor="w")
         tk.Label(right, text="Instruction:", fg=fg, bg=bg).pack(anchor="w", pady=(10, 0))
         self.field = tk.Entry(right, width=52, font=("Helvetica", 13))
         self.field.pack(anchor="w")
         self.field.bind("<Return>", lambda _e: self.run())
+        self.seen_label = tk.Label(right, text="", fg="#b0b0b0", bg=bg, wraplength=430, justify="left")
+        self.seen_label.pack(anchor="w")
         row = tk.Frame(right, bg=bg)
         row.pack(anchor="w", pady=6)
         tk.Button(row, text="Run", command=self.run).pack(side=tk.LEFT, padx=(0, 6))
@@ -224,7 +236,7 @@ class DemoWindow:
                 x0, y0, x1, y1 = (int(v) for v in s["box"])
                 cv2.rectangle(img, (x0, y0), (x1, y1), col, 2)
                 role = self.roles.get(name)
-                tag = (f"{role}: " if role else "") + name + ("" if s["plausible"] else " (rejected)")
+                tag = (f"{role}: " if role else "") + name + ("" if s["plausible"] else " (low confidence)")
                 (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
                 org = (min(max(x0, 2), VIEW_PX - tw - 2), max(y0 - 6, th + 4))
                 cv2.rectangle(img, (org[0] - 2, org[1] - th - 3), (org[0] + tw + 2, org[1] + 4), (0, 0, 0), -1)
@@ -235,7 +247,8 @@ class DemoWindow:
 
     # ----- actions -----
     def object_names(self) -> list[str]:
-        return [n.strip().lower() for n in self.objects.get().split(",") if n.strip()]
+        cubes, plates = instruction_objects(self.field.get())
+        return cubes + plates
 
     def _start(self, fn):
         if self.busy:
@@ -255,15 +268,23 @@ class DemoWindow:
     def _look(self, names):
         seen = self.scene.look(names, self.say)
         self.seen = seen
-        txt = "; ".join(f"{n}: {'seen at ' + ', '.join(f'{100 * v:.0f}' for v in s['base'][:2]) + ' cm' if s['base'] is not None else 'NOT seen'}"
-                        for n, s in seen.items())
-        self.call(self.seen_label.configure, {"text": "Perceived (base x, y): " + txt})
+        def conf(s):
+            t = s.get("terms") or {}
+            return f"det {t.get('det', 0):.2f}, colour {t.get('color', 0):.2f}" + ("" if s["plausible"] else ", LOW")
+        txt = "\n".join(f"  {n}: at {', '.join(f'{100 * v:.0f}' for v in s['base'][:2])} cm ({conf(s)})"
+                         for n, s in seen.items())
+        self.call(self.seen_label.configure, {"text": "Best match per object (base x, y):\n" + txt})
         if self.frame is not None:
             cv2.imwrite(str(self.out / f"look_{time.strftime('%H%M%S')}.jpg"), cv2.cvtColor(self.frame, cv2.COLOR_RGB2BGR))
         return seen
 
     def look(self):
-        self._start(lambda: self._look(self.object_names()))
+        names = self.object_names()
+        if not names:
+            self.call(self.result.configure, {"text": "Name the objects in the instruction (e.g. red cube, blue plate)",
+                                              "fg": "#ff6060"})
+            return
+        self._start(lambda: self._look(names))
 
     def run(self):
         instr = self.field.get().strip()
@@ -279,10 +300,9 @@ class DemoWindow:
         self.call(self.plan_label.configure, {"text": text})
 
     def _run(self, instr):
-        names = self.object_names()
-        cubes = [n for n in names if n.endswith("cube")]
-        plates = [n for n in names if n.endswith("plate")]
+        cubes, plates = instruction_objects(instr)
         self.call(self.result.configure, {"text": ""})
+        self.call(self._log, f"objects named: {', '.join(cubes + plates) or 'none'}")
         self.roles = {}
         self.say("planning with the LLM (5-30 s)")
         plan = self.planner.plan(instr, cubes, plates)
@@ -354,7 +374,6 @@ class DemoWindow:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--objects", nargs="+", default=["white cube", "yellow plate"])
     ap.add_argument("--execute", action="store_true", help="start with 'Execute on the arm' on")
     ap.add_argument("--tries", type=int, default=2, help="attempts per goal when executing")
     ap.add_argument("--planner-gpu", action="store_true", help="run the LLM on the GPU (default CPU, as the sim demo)")

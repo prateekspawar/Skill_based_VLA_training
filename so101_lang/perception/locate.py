@@ -26,8 +26,9 @@ PROMPTS = {"cube": "a small {color} cube", "plate": "a round flat {color} plate"
 
 
 def detector_prompt(query: str) -> str:
-    color, kind = query.split()[0], query.split()[-1]
-    return PROMPTS[kind].format(color=color) if kind in PROMPTS else f"a photo of a {query}"
+    words = query.split()
+    color, kind = (words[0] if len(words) > 1 else ""), words[-1]
+    return " ".join(PROMPTS[kind].format(color=color).split()) if kind in PROMPTS else f"a photo of a {query}"
 
 
 class TargetLocator:

@@ -672,12 +672,18 @@ Granularity study (experiments 1-4) complete; paper draft in `paper/` (authors a
 4. Re-aiming during the descent after late pushes (retries cover it today); find failures (blue cube not proposed).
 5. LLM planner + re-planning: done for pick-and-place (results above). Interactive demo: `scripts/demo.sh`.
    Real robot: `scripts/demo_real.sh` (Tk window, `scripts/demo_real.py`): live rectified left camera with the
-   perceived boxes, the objects on the table (typed; the planner knows only these), instruction -> LLM plan ->
-   look from the side view (locate9 per object) -> goal check (`perceived_on`, as the sim demo). "Execute on the
+   perceived boxes; only the instruction is typed: the cubes/plates it names ("red cube", plain "plate") are the
+   planner's scene, and perception ranks every detected object against each name: the best one wins however poor
+   its match (confidence shown; below the gate drawn magenta "low confidence", not rejected). Instruction -> LLM
+   plan -> look from the side view (locate9 per object) -> goal check (`perceived_on`, as the sim demo). "Execute on the
    arm" (off by default) runs `run_real.py --cube .. --plate ..` per unmet cube-on-plate goal, then looks again
    (`planner.next_goal`, 2 tries). LLM on the CPU: 7.6 s per plan warm, ~28 s for the first (model load; the
    window warms it at start). First test (2026-11-01 evening, room dark under the locked exposure): plan correct,
-   both objects rejected by perception: re-lock the exposure whenever the lighting changes.
+   both objects rejected by perception: re-lock the exposure whenever the lighting changes. Day light (Lux ~181,
+   2026-11-01 morning) clipped 78 % of the image at gain 16: re-locked live to analogue gain 1, colour gains
+   [1.302, 1.266] (white cube 177/177/177; not yet in the Pi's `stereo_config.json`), real colours re-collected
+   (`outputs/real/color_samples_bright.npz`; dim-light set kept as `color_samples_dim.npz`) and refit: real white
+   cube 0.70, yellow plate 0.77. Real stereo heights are too noisy for kind checks (3 cm cube measured up to 11 cm).
    Stacking (towers, cube on a plated cube) set aside for now.
 
 ## 9. File map
