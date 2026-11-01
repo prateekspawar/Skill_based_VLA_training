@@ -671,6 +671,13 @@ Granularity study (experiments 1-4) complete; paper draft in `paper/` (authors a
      client must re-apply the per-joint gains afterwards.
 4. Re-aiming during the descent after late pushes (retries cover it today); find failures (blue cube not proposed).
 5. LLM planner + re-planning: done for pick-and-place (results above). Interactive demo: `scripts/demo.sh`.
+   Real robot: `scripts/demo_real.sh` (Tk window, `scripts/demo_real.py`): live rectified left camera with the
+   perceived boxes, the objects on the table (typed; the planner knows only these), instruction -> LLM plan ->
+   look from the side view (locate9 per object) -> goal check (`perceived_on`, as the sim demo). "Execute on the
+   arm" (off by default) runs `run_real.py --cube .. --plate ..` per unmet cube-on-plate goal, then looks again
+   (`planner.next_goal`, 2 tries). LLM on the CPU: 7.6 s per plan warm, ~28 s for the first (model load; the
+   window warms it at start). First test (2026-11-01 evening, room dark under the locked exposure): plan correct,
+   both objects rejected by perception: re-lock the exposure whenever the lighting changes.
    Stacking (towers, cube on a plated cube) set aside for now.
 
 ## 9. File map
@@ -700,6 +707,7 @@ scripts/
   eval_planner.py              planner LLM on tests/planner_cases.json (no simulator)
   run_replan_eval.sh           LLM planner + re-planning on the composed tasks
   demo.sh                      interactive demo: type an instruction, watch it in the Isaac Sim window
+  demo_real.sh / demo_real.py  the same for the real robot: plan + perception checks, optional execution
   run_eval_randcolor2.sh       the 2026-10-09 comparison (new vs old models, retry vs fused find)
   eval_policy.py               closed-loop evaluation;  gen_demos / gen_fail_demos / gen_find_demos.py: recorders
   calibrate_stereo.py          real head: ChArUco capture window (auto-saves diverse still pairs) + stereo solve
